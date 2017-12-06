@@ -588,9 +588,13 @@ contains
     integer, intent(out)               :: n_part_out
     type(CS_coll_t), intent(in)        :: coll
     type(RNG_t), intent(inout) :: rng
-
+    
+    real(dp)                       :: phi, theta, chi, psi, vel
     real(dp)                           :: bg_vel(3), com_vel(3)
 
+
+    select case(coll%scat_flag)
+      case(0)
     ! TODO: implement random bg velocity
     bg_vel      = 0.0_dp
     n_part_out  = 1
@@ -603,6 +607,29 @@ contains
     part_out(1)%v = part_out(1)%v - com_vel
     call scatter_isotropic(part_out(1), norm2(part_out(1)%v), rng)
     part_out(1)%v = part_out(1)%v + com_vel
+
+      case(1)
+    n_part_out  = 1
+    part_out(1) = part_in
+        psi = 2*UC_pi*rng%unif_01()
+        theta = acos(part_in%v(3)/norm2(part_in%v))
+        if(part_in%v(1) >= 0.0) then
+               if(part_in%v(2) >= 0.0) then
+                        phi = atan(part_in%v(2)/part_in%v(1))
+                else
+                        phi = UC_pi + atan(part_in%v(2)/part_in%v(1))
+               end if
+        else
+                if(part_in%v(2) == 0.0) then
+                        phi = 0.0d0
+                else
+                        phi = UC_pi/2.0d0
+                end if
+        end if
+        chi = scatangle(part_out(1),coll)
+        vel = norm2(part_out(1)%v)
+        call scatter_anisotropic(part_out(1),theta,phi,chi,psi,vel)
+     end select
   end subroutine elastic_collision
 
   !> Perform an excitation-collision for particle 'll'
