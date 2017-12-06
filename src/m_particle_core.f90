@@ -678,6 +678,59 @@ contains
     part%v      = part%v * vel_norm ! Normalization
   end subroutine scatter_isotropic
 
+   subroutine scatter_anisotropic(part_in,theta,phi,chi,psi,vel)
+      use m_units_constants
+      type(PC_part_t), intent(inout)        :: part_in
+      real(dp), intent(IN) :: theta,phi,chi,psi,vel
+
+      real(dp)             :: costheta,cosphi,sintheta,sinphi,coschi, &
+                                     cospsi,sinchi,sinpsi
+
+      costheta = cos(theta)
+      cosphi = cos(phi)
+      sintheta = sin(theta)
+      sinphi = sin(phi)
+    
+     !  find the sines and cosines of chi and psi.
+      coschi = cos(chi)
+      cospsi = cos(psi)
+      sinchi = sin(chi)
+      sinpsi = sin(psi)
+      
+      part_in%v(1) = vel * ( sintheta*cosphi*coschi + &
+                          sinchi*(costheta*cosphi*cospsi-sinphi*sinpsi) )
+      part_in%v(2) = vel * ( sintheta*sinphi*coschi + &
+                          sinchi*(costheta*sinphi*cospsi+cosphi*sinpsi) )
+      part_in%v(3) = vel * ( costheta*coschi - sintheta*sinchi*cospsi )
+      
+   end subroutine scatter_anisotropic
+
+  real(dp) function scatangle(part_in,coll) 
+    use m_units_constants
+    type(PC_part_t), intent(in)        :: part_in
+    type(CS_coll_t), intent(in)        :: coll
+      type(RNG_t) :: rng
+      real(dp) :: sqr_en,kr,en_ev, emp
+      kr= rng%unif_01()
+ 
+
+            en_ev = PC_v_to_en(part_in%v, coll%part_mass)/UC_elec_volt
+            sqr_en=sqrt(en_ev)
+            if (coll%gas_ID =='N2') then
+               emp=(0.065d0*en_ev+0.26d0*sqr_en)/(1.0d0+0.05d0*en_ev+0.2d0*sqr_en)- &
+                   12d0*sqr_en/(1.0d0+40d0*sqr_en)
+               scatangle=acos(1.0d0-1.0d0*kr*(1.0d0-emp)/(1.0d0+emp*(1.0d0-2.0d0*kr)) )
+            else if (coll%gas_ID=='O2') then
+               scatangle=acos((2.0d0+en_ev-2.0d0*(1.0d0+en_ev)**kr)/en_ev)
+            else if (coll%gas_ID=='Ar') then
+               scatangle=acos((2.0d0+en_ev-2.0d0*(1.0d0+en_ev)**kr)/en_ev)
+            else
+               emp  = 4.0d0*en_ev/(1.0d0+4.0d0*en_ev)
+               scatangle=acos(1.0d0-2.0d0*kr*(1.0d0-emp)/(1.0d0+emp*(1.0d0-2.0d0*kr)) )
+            end if
+       
+
+  end function scatangle
   !> Use a Verlet scheme to advance the particle position and velocity over time
   !> dt, and update t_left.
   subroutine PC_verlet_advance(part, dt)
