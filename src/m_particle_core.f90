@@ -640,7 +640,7 @@ contains
     integer, intent(out)               :: n_part_out
     type(CS_coll_t), intent(in)        :: coll
     type(RNG_t), intent(inout) :: rng
-
+    real(dp)                       :: phi, theta, chi, psi
     real(dp)             :: energy, old_en, new_vel
 
     old_en  = PC_v_to_en(part_in%v, coll%part_mass)
@@ -649,7 +649,29 @@ contains
 
     n_part_out  = 1
     part_out(1) = part_in
+    
+    select case(coll%scat_flag)
+       case(0)
     call scatter_isotropic(part_out(1), new_vel, rng)
+       case(1)
+        psi = 2*UC_pi*rng%unif_01()
+        theta = acos(part_in%v(3)/norm2(part_in%v))
+        if(part_in%v(1) >= 0.0) then
+                if(part_in%v(2) >= 0.0) then
+                        phi = atan(part_in%v(2)/part_in%v(1))
+                else
+                        phi = UC_pi + atan(part_in%v(2)/part_in%v(1))
+                end if
+        else
+                if(part_in%v(2) == 0.0) then
+                        phi = 0.0d0
+                else
+                        phi = UC_pi/2.0d0
+                end if
+        end if
+        chi = scatangle(part_out(1),coll)
+        call scatter_anisotropic(part_out(1),theta,phi,chi,psi,new_vel)
+    end select
   end subroutine excite_collision
 
   !> Perform an ionizing collision for particle 'll'
