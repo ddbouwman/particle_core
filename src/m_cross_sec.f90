@@ -29,6 +29,8 @@ module m_cross_sec
      real(dp) :: part_mass  = 0
      real(dp) :: rel_mass   = 0
      real(dp) :: en_loss    = 0
+     character(LEN=tiny_len) :: gas_ID      ! Name of the colliding neutral molecule
+     integer  :: scat_flag       = -1
   end type CS_coll_t
 
   !> The type of cross section table
@@ -50,7 +52,7 @@ module m_cross_sec
        CS_num_types = 4
   integer, parameter :: max_num_cols_per_gas = 50
   integer, parameter :: max_num_rows = 400
-
+  integer, parameter :: ISO_flag = 0, ANI_flag = 1
   ! Public variables
   public :: CS_t
   public :: CS_coll_t
@@ -171,9 +173,20 @@ contains
        end select
 
        cs_buf(cIx)%gas_name = gas_name
+       cs_buf(cIx)%coll%gas_ID = gas_name
+       cs_buf(cIx)%coll%gas_ID = trim(cs_buf(cIx)%coll%gas_ID) ! Store gas identification for scattering model
        cs_buf(cIx)%comment = "COMMENT: (empty)"
        x_scaling = 1.0_dp
        y_scaling = 1.0_dp
+
+       select case(col_type)
+       case (CS_elastic_t)
+          cs_buf(cIx)%coll%scat_flag = ANI_flag ! Flag for scattering model for each collision
+       case (CS_excite_t)
+          cs_buf(cIx)%coll%scat_flag = ANI_flag ! Flag for scattering model for each collision
+       case (CS_ionize_t)
+          cs_buf(cIx)%coll%scat_flag = ANI_flag ! Flag for scattering model for each collision
+       end select
 
        ! Now we can check whether there is a ZDPLASKIN statement and a
        ! reaction description, while scanning lines until dashes are
