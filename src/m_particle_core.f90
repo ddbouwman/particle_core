@@ -749,13 +749,13 @@ contains
     end do
     
     !> Added check to spot a continuing dead particle sooner
-    if ( sum(self%particles(1:self%n_part)%w) < self%n_part ) then
-      print *, "Cleaning didn't work...."
-      do i=1,self%n_part
-        if (self%particles(i)%w<1.0d0) print *, self%particles(i)%x, self%particles(i)%w
-      end do
-      stop
-    end if
+    ! if ( sum(self%particles(1:self%n_part)%w) < self%n_part ) then
+    !   print *, "Cleaning didn't work...."
+    !   do i=1,self%n_part
+    !     if (self%particles(i)%w<1.0d0) print *, self%particles(i)%x, self%particles(i)%w
+    !   end do
+    !   stop
+    ! end if
   end subroutine clean_up
 
   subroutine add_part(self, part)
@@ -829,11 +829,11 @@ contains
     class(PC_t), intent(in) :: self
     integer :: i
       get_num_real_part = sum(self%particles(1:self%n_part)%w)
-      if (get_num_real_part<self%n_part) then
-        do i=1,self%n_part
-          print *, self%particles(i)%x, self%particles(i)%w
-        end do
-      end if
+      ! if (get_num_real_part<self%n_part) then
+      !   do i=1,self%n_part
+      !     print *, self%particles(i)%x, self%particles(i)%w
+      !   end do
+      ! end if
   end function get_num_real_part
 
   !> Return the number of simulation particles
