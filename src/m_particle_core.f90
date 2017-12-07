@@ -1375,7 +1375,7 @@ contains
     integer, allocatable :: bin_counts_sum(:)
     integer, allocatable :: bin_owner(:)
     integer :: prev_num_part(size(pcs))
-    integer :: n_pc, n_avg, tmp_sum
+    integer :: n_pc, n_avg, total, remaining, tmp_sum
     integer :: ll, io, ib, ip, new_loc
 
     type tmp_t
@@ -1384,7 +1384,8 @@ contains
     type(tmp_t), allocatable :: pcs_bins(:)
 
     n_pc = size(pcs)
-    n_avg = ceiling(sum(pcs(:)%n_part) / real(n_pc, dp))
+    total = sum(pcs(:)%n_part)
+    n_avg = ceiling(total / real(n_pc, dp))
 
     allocate(bin_counts(binner%n_bins, n_pc))
     allocate(bin_counts_sum(binner%n_bins))
@@ -1405,13 +1406,15 @@ contains
     bin_counts_sum = sum(bin_counts, dim=2)
     tmp_sum        = 0
     ip             = 1
+    remaining      = total
 
     ! Set the owners of the bins
     do ib = 1, binner%n_bins
        tmp_sum = tmp_sum + bin_counts_sum(ib)
        bin_owner(ib) = ip
-       if (tmp_sum >= n_avg) then
+       if (tmp_sum >= remaining / real(n_pc-ip+1, dp)) then
           ip = ip + 1
+          remaining = remaining - tmp_sum
           tmp_sum = 0
        end if
     end do
