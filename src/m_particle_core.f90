@@ -583,6 +583,7 @@ contains
 
   !> Perform an elastic collision for particle 'll'
   subroutine elastic_collision(part_in, part_out, n_part_out, coll, rng)
+    use m_units_constants
     type(PC_part_t), intent(in)        :: part_in
     type(PC_part_t), intent(inout)     :: part_out(:)
     integer, intent(out)               :: n_part_out
@@ -613,7 +614,7 @@ contains
     part_out(1) = part_in
         psi = 2*UC_pi*rng%unif_01()
         theta = acos(part_in%v(3)/norm2(part_in%v))
-        if(part_in%v(1) >= 0.0) then
+        if(abs(part_in%v(1)) >= UC_tiny) then
                if(part_in%v(2) >= 0.0) then
                         phi = atan(part_in%v(2)/part_in%v(1))
                 else
@@ -626,7 +627,7 @@ contains
                         phi = UC_pi/2.0d0
                 end if
         end if
-        chi = scatangle(part_out(1),coll)
+        chi = scatangle(part_out(1),coll,rng)
         vel = norm2(part_out(1)%v)
         call scatter_anisotropic(part_out(1),theta,phi,chi,psi,vel)
      end select
@@ -656,7 +657,7 @@ contains
        case(1)
         psi = 2*UC_pi*rng%unif_01()
         theta = acos(part_in%v(3)/norm2(part_in%v))
-        if(part_in%v(1) >= 0.0) then
+        if(abs(part_in%v(1)) >= UC_tiny) then
                 if(part_in%v(2) >= 0.0) then
                         phi = atan(part_in%v(2)/part_in%v(1))
                 else
@@ -669,7 +670,7 @@ contains
                         phi = UC_pi/2.0d0
                 end if
         end if
-        chi = scatangle(part_out(1),coll)
+        chi = scatangle(part_out(1),coll,rng)
         call scatter_anisotropic(part_out(1),theta,phi,chi,psi,new_vel)
     end select
   end subroutine excite_collision
@@ -702,7 +703,7 @@ contains
       case(1)
         psi = 2*UC_pi*rng%unif_01()
         theta = acos(part_in%v(3)/norm2(part_in%v))
-        if(part_in%v(1) >= 0.0) then
+        if(abs(part_in%v(1)) >= UC_tiny) then
               if(part_in%v(2) >= 0.0) then
                         phi = atan(part_in%v(2)/part_in%v(1))
               else
@@ -787,11 +788,11 @@ contains
       
    end subroutine scatter_anisotropic
 
-  real(dp) function scatangle(part_in,coll) 
+  real(dp) function scatangle(part_in,coll,rng) 
     use m_units_constants
     type(PC_part_t), intent(in)        :: part_in
     type(CS_coll_t), intent(in)        :: coll
-      type(RNG_t) :: rng
+      type(RNG_t), intent(inout) :: rng
       real(dp) :: sqr_en,kr,en_ev, emp
       kr= rng%unif_01()
  
