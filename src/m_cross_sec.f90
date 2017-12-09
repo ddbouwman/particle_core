@@ -131,8 +131,9 @@ contains
           col_type = CS_elastic_t
        case ("EFFECTIVE")
           col_type = CS_elastic_t
-          print *, "CS_read_file warning: using EFFECTIVE elastic cross section for ", &
+          print *, "CS_read_file: using EFFECTIVE elastic cross section for ", &
                trim(gas_name), ", this should not be used in particle simulations."
+          error stop "Wrong type of cross sections"
        case ("EXCITATION")
           col_type = CS_excite_t
        case ("IONIZATION")
