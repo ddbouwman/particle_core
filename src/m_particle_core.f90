@@ -32,6 +32,9 @@ module m_particle_core
   !> \todo Consider making this a variable again (but check OpenMP performance)
   integer, parameter, public :: PC_max_num_coll = 100
 
+  !> Maximum number of particles created by one collision (e.g., ionization)
+  integer, parameter :: PC_coll_max_part_out = 2
+
   !> The particle type
   type, public :: PC_part_t
      real(dp) :: x(3)   = 0     !< Position
@@ -84,11 +87,6 @@ module m_particle_core
      !> If assigned, call this method after moving particles, to check whether
      !> they are outside the computational domain
      procedure(p_to_logic_f), pointer, nopass :: outside_check  => null()
-     
-     !> If assigned, call this method after moving particles, to check whether
-     !> they are inside an object, if true, call all attachment_callbacks 
-     !> and delete particle thereafter
-     procedure(p_to_logic_f), pointer, nopass :: inside_check  => null()
 
      !> If assigned, call this method after an ionization has occurred
      type(callback_t), allocatable :: ionization_callbacks(:)
@@ -112,6 +110,7 @@ module m_particle_core
      procedure, non_overridable :: resize_part_list
      procedure, non_overridable :: remove_particles
      procedure, non_overridable :: advance
+     procedure, non_overridable :: advance_openmp
      procedure, non_overridable :: clean_up
      procedure, non_overridable :: create_part
      procedure, non_overridable :: add_part
@@ -159,7 +158,7 @@ module m_particle_core
      !> Interface for callbacks, which may for example add particles
      subroutine coll_callback_p(self, my_part, c_ix, c_type)
        import
-       class(PC_t), intent(inout)  :: self
+       class(PC_t), intent(in)     :: self
        type(PC_part_t), intent(in) :: my_part
        integer, intent(in)         :: c_ix, c_type
      end subroutine coll_callback_p
@@ -419,159 +418,175 @@ contains
 
   subroutine advance(self, dt)
     class(PC_t), intent(inout) :: self
-    real(dp), intent(in)           :: dt
-    integer                        :: ll
+    real(dp), intent(in)       :: dt
+    integer                    :: n, n_new
+    type(PC_part_t)            :: new_part(100)
 
     self%particles(1:self%n_part)%t_left = dt
-    ll = 1
+    n = 1
 
-    do while (ll <= self%n_part)
-       call self%move_and_collide(ll)
-       ll = ll + 1
+    do while (n <= self%n_part)
+       call self%move_and_collide(self%particles(n), &
+            self%rng, new_part, n_new)
+
+       if (self%particles(n)%w <= PC_dead_weight) then
+          call self%remove_part(n)
+       end if
+
+       if (n_new > 0) then
+          call self%check_space(self%n_part + n_new)
+          self%particles(self%n_part+1:self%n_part+n_new) = &
+               new_part(1:n_new)
+          self%n_part = self%n_part + n_new
+       end if
+       n = n + 1
     end do
 
     call self%clean_up()
   end subroutine advance
 
-  ! subroutine advance_openmp(self, dt)
-  !   class(PC_t), intent(inout) :: self
-  !   real(dp), intent(in)           :: dt
-  !   integer                        :: ll
+  subroutine advance_openmp(self, dt)
+    use omp_lib
+    class(PC_t), intent(inout) :: self
+    real(dp), intent(in)       :: dt
+    integer                    :: n, n_part, n_new, tid, n_lo, n_hi
+    type(PC_part_t)            :: new_part(100)
+    type(prng_t)               :: prng
 
-  !   self%particles(1:self%n_part)%t_left = dt
+    call prng%init_parallel(omp_get_max_threads(), self%rng)
+    self%particles(1:self%n_part)%t_left = dt
+    n_lo = 1
 
-  !   do while (.true.)
-  !      do ll = 1, num_part
-  !         call self%move_and_collide(ll, )
-  !      end do
-  !   end do
+    !$omp parallel private(n, tid, new_part, n_new, n_part)
+    tid = omp_get_thread_num() + 1
+    do
+       n_hi = self%n_part
+       !$omp do
+       do n = n_lo, n_hi
+          call self%move_and_collide(self%particles(n), &
+               prng%rngs(tid), new_part, n_new)
 
-  !   call self%clean_up()
-  ! end subroutine advance_openmp
+          if (self%particles(n)%w <= PC_dead_weight) then
+             !$omp critical
+             call self%remove_part(n)
+             !$omp end critical
+          end if
 
-  subroutine move_and_collide(self, part_in, rng, part_out, n_part_out)
+          if (n_new > 0) then
+             !$omp critical
+             n_part = self%n_part
+             self%n_part = self%n_part + n_new
+             !$omp end critical
+             self%particles(n_part+1:n_part+n_new) = new_part(1:n_new)
+          end if
+       end do
+       !$omp end do
+
+       if (self%n_part > n_hi) then
+          n_lo = n_hi + 1
+       else
+          exit
+       end if
+    end do
+    !$omp end parallel
+
+    call self%clean_up()
+    self%rng = prng%rngs(1)
+  end subroutine advance_openmp
+
+  subroutine move_and_collide(self, part, rng, new_part, n_new)
     use m_cross_sec
     class(PC_t), intent(in)        :: self
     type(RNG_t), intent(inout)     :: rng
-    type(PC_part_t), intent(in)    :: part_in
-    type(PC_part_t), intent(inout) :: part_out(:)
-    integer, intent(out)           :: n_part_out
+    type(PC_part_t), intent(inout) :: part
+    type(PC_part_t), intent(inout) :: new_part(:)
+    integer, intent(out)           :: n_new
 
-    integer         :: cIx, cType, n, n_part_out
-    real(dp)        :: coll_time, new_vel
-    type(PC_part_t) :: tmp_part
+    integer            :: cIx, cType, n, n_coll_out
+    real(dp)           :: coll_time, new_vel
+    type(PC_part_t)    :: coll_out(PC_coll_max_part_out)
 
-    part_out(1) = part_in
-    n_part_out  = 1
+    n_new = 0
 
     do
        ! Get the next collision time
        coll_time = sample_coll_time(rng%unif_01(), self%inv_max_rate)
 
        ! If larger than t_left, advance the particle without a collision
-       if (coll_time > part_in%t_left) exit
+       if (coll_time > part%t_left) exit
 
        ! Ensure we don't move the particle over more than dt_max
        do while (coll_time > self%dt_max)
-          call self%particle_mover(part_out(1), self%dt_max)
+          call self%particle_mover(part, self%dt_max)
           coll_time = coll_time - self%dt_max
        end do
 
        ! Move particle to collision time
-       call self%particle_mover(part_out(1), coll_time)
-
-       if (associated(self%inside_check)) then
-          if (self%inside_check(part_out(1))) then
-            do n = 1, size(self%attachment_callbacks)
-               call self%attachment_callbacks(n)%ptr(self, &
-                    part_out(1), cIx, cType)
-            end do
-            call self%remove_part(ll)
-            go to 100
-          end if
-       end if
+       call self%particle_mover(part, coll_time)
 
        if (associated(self%outside_check)) then
-          if (self%outside_check(part_out(1))) then
-             call self%remove_part(ll)
-             go to 100
+          if (self%outside_check(part)) then
+             part%w = PC_dead_weight
+             return
           end if
        end if
 
-       new_vel = norm2(part_out(1)%v)
+       new_vel = norm2(part%v)
        cIx     = get_coll_index(self%rate_lt, self%n_colls, self%max_rate, &
             new_vel, rng%unif_01())
 
        if (cIx > 0) then
           ! Perform the corresponding collision
           cType    = self%colls(cIx)%type
-          tmp_part = part_out(1)
 
           select case (cType)
           case (CS_attach_t)
-             call attach_collision(part_out(1), part_out, &
-                  n_part_out, self%colls(cIx), rng)
              do n = 1, size(self%attachment_callbacks)
                 call self%attachment_callbacks(n)%ptr(self, &
-                     part_out(1), cIx, cType)
+                     part, cIx, cType)
              end do
+             call attach_collision(part, coll_out, &
+                  n_coll_out, self%colls(cIx), rng)
           case (CS_elastic_t)
-             call elastic_collision(part_out(1), part_out, &
-                  n_part_out, self%colls(cIx), rng)
+             call elastic_collision(part, coll_out, &
+                  n_coll_out, self%colls(cIx), rng)
           case (CS_excite_t)
-             call excite_collision(part_out(1), part_out, &
-                  n_part_out, self%colls(cIx), rng)
+             call excite_collision(part, coll_out, &
+                  n_coll_out, self%colls(cIx), rng)
           case (CS_ionize_t)
-             call ionization_collision(part_out(1), part_out, &
-                  n_part_out, self%colls(cIx), rng)
              do n = 1, size(self%ionization_callbacks)
                 call self%ionization_callbacks(n)%ptr(self, &
-                     part_out(1), cIx, cType)
+                     part, cIx, cType)
              end do
+             call ionization_collision(part, coll_out, &
+                  n_coll_out, self%colls(cIx), rng)
           case default
-             stop "Wrong collision type"
+             error stop "Wrong collision type"
           end select
 
-          ! Store the particles returned. The first one goes at location ll, the
-          ! rest at the end of the list.
-          if (n_part_out == 0) then
-             call self%remove_part(ll)
-             go to 100          ! Particle no longer exists
-          else if (n_part_out == 1) then
-             mypart = part_out(1)
+          ! Store the particles returned
+          if (n_coll_out == 0) then
+             exit
+          else if (n_coll_out == 1) then
+             part = coll_out(1)
           else
-             call self%check_space(self%n_part + n_part_out - 1)
-             mypart = part_out(1)
-             self%particles(self%n_part+1:self%n_part+n_part_out-1) = &
-                  part_out(2:n_part_out)
-             self%n_part = self%n_part + n_part_out - 1
+             part = coll_out(1)
+             new_part(n_new+1:n_new+n_coll_out-1) = &
+                  coll_out(2:n_coll_out)
+             n_new = n_new + n_coll_out - 1
           end if
        end if
     end do
 
     ! Move particle to end of the time step
-    call self%particle_mover(mypart, mypart%t_left)
-    
-    !> one final check if it is inside the object or outside the domain
-    if (associated(self%inside_check)) then
-       if (self%inside_check(mypart)) then
-         do n = 1, size(self%attachment_callbacks)
-            call self%attachment_callbacks(n)%ptr(self, &
-                 mypart, cIx, cType)
-         end do
-         call self%remove_part(ll)
-         go to 100
-       end if
-    end if
+    call self%particle_mover(part, part%t_left)
 
     if (associated(self%outside_check)) then
-       if (self%outside_check(mypart)) then
-          call self%remove_part(ll)
-          go to 100
+       if (self%outside_check(part)) then
+          part%w = PC_dead_weight
        end if
     end if
 
-100 continue
   end subroutine move_and_collide
 
   !> Returns a sample from the exponential distribution of the collision times
@@ -747,7 +762,7 @@ contains
 
   subroutine clean_up(self)
     class(PC_t), intent(inout) :: self
-    integer :: ix_end, ix_clean, n_part, i
+    integer :: ix_end, ix_clean, n_part
     logical :: success
 
     do
@@ -768,15 +783,6 @@ contains
           end if
        end do
     end do
-    
-    !> Added check to spot a continuing dead particle sooner
-    ! if ( sum(self%particles(1:self%n_part)%w) < self%n_part ) then
-    !   print *, "Cleaning didn't work...."
-    !   do i=1,self%n_part
-    !     if (self%particles(i)%w<1.0d0) print *, self%particles(i)%x, self%particles(i)%w
-    !   end do
-    !   stop
-    ! end if
   end subroutine clean_up
 
   subroutine add_part(self, part)
@@ -848,13 +854,8 @@ contains
   !> Return the number of real particles
   real(dp) function get_num_real_part(self)
     class(PC_t), intent(in) :: self
-    integer :: i
-      get_num_real_part = sum(self%particles(1:self%n_part)%w)
-      ! if (get_num_real_part<self%n_part) then
-      !   do i=1,self%n_part
-      !     print *, self%particles(i)%x, self%particles(i)%w
-      !   end do
-      ! end if
+
+    get_num_real_part = sum(self%particles(1:self%n_part)%w)
   end function get_num_real_part
 
   !> Return the number of simulation particles

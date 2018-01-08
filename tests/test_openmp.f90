@@ -65,7 +65,7 @@ program test_m_particle_core
      print *, "at step", step, " and time ", (step-1) * delta_t
      call print_stats()
 
-     call pc%advance(delta_t)
+     call pc%advance_openmp(delta_t)
   end do
 
   call print_stats()
