@@ -433,36 +433,58 @@ contains
     call self%clean_up()
   end subroutine advance
 
-  subroutine move_and_collide(self, ll)
+  ! subroutine advance_openmp(self, dt)
+  !   class(PC_t), intent(inout) :: self
+  !   real(dp), intent(in)           :: dt
+  !   integer                        :: ll
+
+  !   self%particles(1:self%n_part)%t_left = dt
+
+  !   do while (.true.)
+  !      do ll = 1, num_part
+  !         call self%move_and_collide(ll, )
+  !      end do
+  !   end do
+
+  !   call self%clean_up()
+  ! end subroutine advance_openmp
+
+  subroutine move_and_collide(self, part_in, rng, part_out, n_part_out)
     use m_cross_sec
-    class(PC_t), intent(inout) :: self
-    integer, intent(in)        :: ll
-    integer                    :: cIx, cType, n, n_part_out
-    real(dp)                   :: coll_time, new_vel
-    integer, parameter         :: max_num_part_out = 2
-    type(PC_part_t)            :: part_out(max_num_part_out)
+    class(PC_t), intent(in)        :: self
+    type(RNG_t), intent(inout)     :: rng
+    type(PC_part_t), intent(in)    :: part_in
+    type(PC_part_t), intent(inout) :: part_out(:)
+    integer, intent(out)           :: n_part_out
+
+    integer         :: cIx, cType, n, n_part_out
+    real(dp)        :: coll_time, new_vel
+    type(PC_part_t) :: tmp_part
+
+    part_out(1) = part_in
+    n_part_out  = 1
 
     do
        ! Get the next collision time
-       coll_time = sample_coll_time(self%rng%unif_01(), self%inv_max_rate)
+       coll_time = sample_coll_time(rng%unif_01(), self%inv_max_rate)
 
        ! If larger than t_left, advance the particle without a collision
-       if (coll_time > self%particles(ll)%t_left) exit
+       if (coll_time > part_in%t_left) exit
 
        ! Ensure we don't move the particle over more than dt_max
        do while (coll_time > self%dt_max)
-          call self%particle_mover(self%particles(ll), self%dt_max)
+          call self%particle_mover(part_out(1), self%dt_max)
           coll_time = coll_time - self%dt_max
        end do
 
        ! Move particle to collision time
-       call self%particle_mover(self%particles(ll), coll_time)
+       call self%particle_mover(part_out(1), coll_time)
 
        if (associated(self%inside_check)) then
-          if (self%inside_check(self%particles(ll))) then
+          if (self%inside_check(part_out(1))) then
             do n = 1, size(self%attachment_callbacks)
                call self%attachment_callbacks(n)%ptr(self, &
-                    self%particles(ll), cIx, cType)
+                    part_out(1), cIx, cType)
             end do
             call self%remove_part(ll)
             go to 100
@@ -470,40 +492,41 @@ contains
        end if
 
        if (associated(self%outside_check)) then
-          if (self%outside_check(self%particles(ll))) then
+          if (self%outside_check(part_out(1))) then
              call self%remove_part(ll)
              go to 100
           end if
        end if
 
-       new_vel = norm2(self%particles(ll)%v)
+       new_vel = norm2(part_out(1)%v)
        cIx     = get_coll_index(self%rate_lt, self%n_colls, self%max_rate, &
-            new_vel, self%rng%unif_01())
+            new_vel, rng%unif_01())
 
        if (cIx > 0) then
           ! Perform the corresponding collision
-          cType   = self%colls(cIx)%type
+          cType    = self%colls(cIx)%type
+          tmp_part = part_out(1)
 
           select case (cType)
           case (CS_attach_t)
-             call attach_collision(self%particles(ll), part_out, &
-                  n_part_out, self%colls(cIx), self%rng)
+             call attach_collision(part_out(1), part_out, &
+                  n_part_out, self%colls(cIx), rng)
              do n = 1, size(self%attachment_callbacks)
                 call self%attachment_callbacks(n)%ptr(self, &
-                     self%particles(ll), cIx, cType)
+                     part_out(1), cIx, cType)
              end do
           case (CS_elastic_t)
-             call elastic_collision(self%particles(ll), part_out, &
-                  n_part_out, self%colls(cIx), self%rng)
+             call elastic_collision(part_out(1), part_out, &
+                  n_part_out, self%colls(cIx), rng)
           case (CS_excite_t)
-             call excite_collision(self%particles(ll), part_out, &
-                  n_part_out, self%colls(cIx), self%rng)
+             call excite_collision(part_out(1), part_out, &
+                  n_part_out, self%colls(cIx), rng)
           case (CS_ionize_t)
-             call ionization_collision(self%particles(ll), part_out, &
-                  n_part_out, self%colls(cIx), self%rng)
+             call ionization_collision(part_out(1), part_out, &
+                  n_part_out, self%colls(cIx), rng)
              do n = 1, size(self%ionization_callbacks)
                 call self%ionization_callbacks(n)%ptr(self, &
-                     self%particles(ll), cIx, cType)
+                     part_out(1), cIx, cType)
              end do
           case default
              stop "Wrong collision type"
@@ -515,10 +538,10 @@ contains
              call self%remove_part(ll)
              go to 100          ! Particle no longer exists
           else if (n_part_out == 1) then
-             self%particles(ll) = part_out(1)
+             mypart = part_out(1)
           else
              call self%check_space(self%n_part + n_part_out - 1)
-             self%particles(ll) = part_out(1)
+             mypart = part_out(1)
              self%particles(self%n_part+1:self%n_part+n_part_out-1) = &
                   part_out(2:n_part_out)
              self%n_part = self%n_part + n_part_out - 1
@@ -527,14 +550,14 @@ contains
     end do
 
     ! Move particle to end of the time step
-    call self%particle_mover(self%particles(ll), self%particles(ll)%t_left)
+    call self%particle_mover(mypart, mypart%t_left)
     
     !> one final check if it is inside the object or outside the domain
     if (associated(self%inside_check)) then
-       if (self%inside_check(self%particles(ll))) then
+       if (self%inside_check(mypart)) then
          do n = 1, size(self%attachment_callbacks)
             call self%attachment_callbacks(n)%ptr(self, &
-                 self%particles(ll), cIx, cType)
+                 mypart, cIx, cType)
          end do
          call self%remove_part(ll)
          go to 100
@@ -542,7 +565,7 @@ contains
     end if
 
     if (associated(self%outside_check)) then
-       if (self%outside_check(self%particles(ll))) then
+       if (self%outside_check(mypart)) then
           call self%remove_part(ll)
           go to 100
        end if
@@ -583,13 +606,12 @@ contains
 
   !> Perform an elastic collision for particle 'll'
   subroutine elastic_collision(part_in, part_out, n_part_out, coll, rng)
-    type(PC_part_t), intent(in)        :: part_in
-    type(PC_part_t), intent(inout)     :: part_out(:)
-    integer, intent(out)               :: n_part_out
-    type(CS_coll_t), intent(in)        :: coll
-    type(RNG_t), intent(inout) :: rng
-
-    real(dp)                           :: bg_vel(3), com_vel(3)
+    type(PC_part_t), intent(in)    :: part_in
+    type(PC_part_t), intent(inout) :: part_out(:)
+    integer, intent(out)           :: n_part_out
+    type(CS_coll_t), intent(in)    :: coll
+    type(RNG_t), intent(inout)     :: rng
+    real(dp)                       :: bg_vel(3), com_vel(3)
 
     ! TODO: implement random bg velocity
     bg_vel      = 0.0_dp
@@ -608,11 +630,11 @@ contains
   !> Perform an excitation-collision for particle 'll'
   subroutine excite_collision(part_in, part_out, n_part_out, coll, rng)
     use m_units_constants
-    type(PC_part_t), intent(in)        :: part_in
-    type(PC_part_t), intent(inout)     :: part_out(:)
-    integer, intent(out)               :: n_part_out
-    type(CS_coll_t), intent(in)        :: coll
-    type(RNG_t), intent(inout) :: rng
+    type(PC_part_t), intent(in)    :: part_in
+    type(PC_part_t), intent(inout) :: part_out(:)
+    integer, intent(out)           :: n_part_out
+    type(CS_coll_t), intent(in)    :: coll
+    type(RNG_t), intent(inout)     :: rng
 
     real(dp)             :: energy, old_en, new_vel
 
@@ -628,12 +650,11 @@ contains
   !> Perform an ionizing collision for particle 'll'
   subroutine ionization_collision(part_in, part_out, n_part_out, coll, rng)
     use m_units_constants
-    type(PC_part_t), intent(in)        :: part_in
-    type(PC_part_t), intent(inout)     :: part_out(:)
-    integer, intent(out)               :: n_part_out
-    type(CS_coll_t), intent(in)        :: coll
-    type(RNG_t), intent(inout) :: rng
-
+    type(PC_part_t), intent(in)    :: part_in
+    type(PC_part_t), intent(inout) :: part_out(:)
+    integer, intent(out)           :: n_part_out
+    type(CS_coll_t), intent(in)    :: coll
+    type(RNG_t), intent(inout)     :: rng
     real(dp)                       :: energy, old_en, velocity
 
     old_en      = PC_v_to_en(part_in%v, coll%part_mass)
@@ -650,11 +671,11 @@ contains
   !> Perform attachment of electron 'll'
   subroutine attach_collision(part_in, part_out, n_part_out, coll, rng)
     use m_units_constants
-    type(PC_part_t), intent(in)        :: part_in
-    type(PC_part_t), intent(inout)     :: part_out(:)
-    integer, intent(out)               :: n_part_out
-    type(CS_coll_t), intent(in)        :: coll
-    type(RNG_t), intent(inout) :: rng
+    type(PC_part_t), intent(in)    :: part_in
+    type(PC_part_t), intent(inout) :: part_out(:)
+    integer, intent(out)           :: n_part_out
+    type(CS_coll_t), intent(in)    :: coll
+    type(RNG_t), intent(inout)     :: rng
     n_part_out = 0
   end subroutine attach_collision
 
