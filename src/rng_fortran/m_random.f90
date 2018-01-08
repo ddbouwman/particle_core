@@ -18,6 +18,7 @@ module m_random
   type rng_t
      !> The rng state (always use your own seed)
      integer(i8), private       :: s(2) = [123456789_i8, 987654321_i8]
+     integer(i8), private       :: separator(32) ! Separate cache lines (parallel use)
    contains
      procedure, non_overridable :: set_seed    ! Seed the generator
      procedure, non_overridable :: jump        ! Jump function (see below)
@@ -65,6 +66,9 @@ contains
     integer(i8), intent(in)     :: the_seed(2)
 
     self%s = the_seed
+
+    ! Simulate calls to next() to improve randomness of first number
+    call self%jump()
   end subroutine set_seed
 
   ! This is the jump function for the generator. It is equivalent
