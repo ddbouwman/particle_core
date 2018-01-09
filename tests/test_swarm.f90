@@ -5,25 +5,24 @@ program test_m_particle_core
 
   implicit none
 
-  integer, parameter :: dp = kind(0.0d0)
-  character(len=*), parameter :: cs_file = "test_m_particle_core_cs.txt"
-  character(len=*), parameter :: gas_name = "druyv_gas"
+  integer, parameter          :: dp       = kind(0.0d0)
+  character(len=*), parameter :: cs_file  = "cs_example.txt"
+  character(len=*), parameter :: gas_name = "N2"
 
   integer, parameter      :: max_num_part  = 1000*1000
   integer, parameter      :: init_num_part = 10*1000
   integer, parameter      :: max_num_steps = 100
   integer, parameter      :: lkp_tbl_size  = 1000
-  integer, parameter      :: num_lists     = 12
-  integer, parameter      :: n_bins        = 100
-  real(dp), parameter     :: delta_t       = 5.0e-9_dp
-  real(dp), parameter     :: max_en_eV     = 1.0e-1_dp
-  real(dp), parameter     :: neutral_dens  = 2.5e25_dp
+  real(dp), parameter     :: delta_t       = 1.0e-11_dp
+  real(dp), parameter     :: max_en_eV     = 500.0_dp
+  real(dp), parameter     :: pressure      = 1.0_dp
+  real(dp), parameter     :: temperature   = 300.0_dp
+  real(dp), parameter     :: field_z       = -5e6_dp
   real(dp), parameter     :: part_mass     = UC_elec_mass
-  real(dp), parameter     :: init_accel(3) = (/0.0_dp, 0.0_dp, 1.0e12_dp/)
-  real(dp)                :: norm_cross_sec, mass_ratio
+  real(dp)                :: init_accel(3)
   real(dp)                :: pos(3), vel(3), accel(3), weight
-  real(dp)                :: bin_args(1)
-  integer                 :: ll, step, num_colls
+  real(dp)                :: neutral_dens
+  integer                 :: ll, step, rng_seed(4)
   type(CS_t), allocatable :: cross_secs(:)
   type(PC_t)              :: pc
 
@@ -31,40 +30,31 @@ program test_m_particle_core
 
   ! Use constant momentum transfer cross section, so that we get a Druyvesteyn
   ! distribution
+  neutral_dens = pressure * 1e5_dp / (UC_boltzmann_const * temperature)
+
   print *, "Reading in cross sections from ", trim(cs_file)
   call CS_add_from_file(cs_file, gas_name, neutral_dens, max_en_eV, &
        cross_secs)
 
-  ! All cross sections should be constant, simply take the first value
-  norm_cross_sec = 0
-  do ll = 1, size(cross_secs)
-     norm_cross_sec = norm_cross_sec + cross_secs(ll)%en_cs(2,1)
-  end do
-  print *, "Total cross sec", norm_cross_sec
-  mass_ratio = cross_secs(1)%coll%rel_mass
-
   print *, "Initializing particle module"
-  print *, part_mass
+  rng_seed = get_random_seed()
   call pc%initialize(part_mass, cross_secs, lkp_tbl_size, &
-       max_en_eV, max_num_part)
-
-  num_colls = pc%get_num_colls()
-  deallocate(cross_secs)
+       max_en_eV, max_num_part, rng_seed=rng_seed)
 
   print *, "Creating initial particles"
+  init_accel = [0.0_dp, 0.0_dp, field_z * UC_elec_q_over_m]
+
   do ll = 1, init_num_part
      pos    = 0.0_dp
      vel    = 0.0_dp
      accel  = init_accel
-     weight = 1
+     weight = 1.0_dp
      call pc%create_part(pos, vel, accel, weight, 0.0_dp)
   end do
 
   do step = 1, max_num_steps
-     print *, ""
-     print *, "at step", step, " and time ", (step-1) * delta_t
-     call print_stats()
-
+     write(*, '(F10.2,A,I10,A)') (step * 100.0_dp)/max_num_steps, '%, ', &
+          pc%get_num_sim_part(), ' particles'
      call pc%advance_openmp(delta_t)
   end do
 
@@ -88,6 +78,11 @@ contains
     real(dp) :: sum_weight
     real(dp) :: sum_vec(11)
 
+    real(dp), parameter :: x3_stored        = 1.9793569827856038e-4_dp
+    real(dp), parameter :: n_stored         = 64106.0_dp
+    real(dp), parameter :: max_deviation(2) = [2.0e-3_dp, 2.0e-2_dp]
+    real(dp)            :: rel_deviation(2)
+
     n_part = 0
 
     n_part = n_part + pc%get_num_sim_part()
@@ -99,12 +94,29 @@ contains
     sum_a = sum_vec(7:9)
     sum_en =  sum_vec(10)
 
-    ! print *, "mean position", sum_x / sum_weight
-    ! print *, "mean velocity", sum_v / sum_weight
-    print *, "mean energy (eV)              ", sum_en / (sum_weight * UC_elec_volt)
-    print *, "Druyvesteyn mean energy: (eV) ", 0.5_dp * UC_elec_mass * 0.739669_dp / &
-         (sqrt(3*norm_cross_sec**2 * (2 / (1 + 1/mass_ratio)) / (8 * init_accel(3)**2)) *  UC_elec_volt)
-    print *, "Number of particles           ", n_part, sum_weight
+    print *, ""
+    write(*, '(A,3E12.4)') " mean(x):", sum_x / sum_weight
+    write(*, '(A,E12.4)') " n_particles", sum_weight
+    rel_deviation = [abs(x3_stored - sum_x(3) / sum_weight) / x3_stored, &
+         abs(n_stored - sum_weight) / n_stored]
+    write(*, '(A,2E12.4)') " Rel. diff. with stored run: ", rel_deviation
+    if (all(rel_deviation < max_deviation)) then
+       print *, "PASS"
+    else
+       print *, "Deviation too large"
+       error stop "FAIL"
+    end if
   end subroutine print_stats
+
+  !> Get a random seed based on the current time
+  function get_random_seed() result(seed)
+    integer :: seed(4)
+    integer :: time, i
+
+    call system_clock(time)
+    do i = 1, 4
+       seed(i) = ishftc(time, i*8)
+    end do
+  end function get_random_seed
 
 end program test_m_particle_core

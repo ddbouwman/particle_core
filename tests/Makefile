@@ -1,7 +1,6 @@
 FC 	:= mpif90
-FFLAGS	:= -Wall -ffpe-trap=invalid,zero,overflow -g -O2 -fopenmp \
-	-fcheck=all
-TESTS	:= test_m_particle_core test_m_cross_sec test_openmp
+FFLAGS	:= -Wall -g -O2 -fopenmp $(USR_FLAGS)
+TESTS	:= test_m_particle_core test_m_cross_sec test_openmp test_swarm
 
 # Need these libraries for the tests
 LIBS	:= particle_core
