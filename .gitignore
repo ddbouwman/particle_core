@@ -11,3 +11,5 @@
 test_m_cross_sec
 test_m_particle_core
 test_m_photoi
+/tests/test_openmp
+/tests/test_swarm
