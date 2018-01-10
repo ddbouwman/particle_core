@@ -42,6 +42,10 @@ program test_m_particle_core
   call pc%initialize(part_mass, cross_secs, lkp_tbl_size, &
        max_en_eV, max_num_part, rng_seed=rng_seed)
 
+  where (pc%colls(:)%type == CS_ionize_t)
+     pc%coll_is_event(:) = .true.
+  end where
+
   print *, "Creating initial particles"
   init_accel = [0.0_dp, 0.0_dp, field_z * UC_elec_q_over_m]
 
@@ -57,6 +61,7 @@ program test_m_particle_core
      write(*, '(F10.2,A,I10,A)') (step * 100.0_dp)/max_num_steps, '%, ', &
           pc%get_num_sim_part(), ' particles'
      call pc%advance_openmp(delta_t, events)
+     print *, step, "total number of ionizations: ", events%n_stored
   end do
 
   call print_stats()

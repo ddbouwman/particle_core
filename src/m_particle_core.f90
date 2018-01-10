@@ -52,13 +52,14 @@ module m_particle_core
 
   !> An event (particle collision)
   type, public :: PC_event_t
-     type(PC_part_t) :: part !< Particle that had collision
-     integer         :: cix  !< Collision index
+     type(PC_part_t) :: part  !< Particle that had collision
+     integer         :: cix   !< Collision index
+     integer         :: ctype !< Collision type
   end type PC_event_t
 
   !> A list of events (particle collisions)
   type, public :: PC_events_t
-     integer                       :: n_stored
+     integer                       :: n_stored = 0
      type(PC_event_t), allocatable :: list(:)
   end type PC_events_t
 
@@ -616,9 +617,10 @@ contains
           cType    = self%colls(cIx)%type
 
           if (self%coll_is_event(cIx)) then
-             n_events              = n_events + 1
-             events(n_events)%part = part
-             events(n_events)%cix  = cix
+             n_events               = n_events + 1
+             events(n_events)%part  = part
+             events(n_events)%cix   = cIx
+             events(n_events)%ctype = cType
           end if
 
           select case (cType)
@@ -818,21 +820,25 @@ contains
     if (.not. associated(pc%accel_function)) &
          stop "particle_core error: accel_func is not set"
 
+    !$omp parallel do private(ll, new_accel)
     do ll = 1, pc%n_part
        new_accel = pc%accel_function(pc%particles(ll))
        pc%particles(ll)%v = pc%particles(ll)%v + &
             0.5_dp * (new_accel - pc%particles(ll)%a) * dt
        pc%particles(ll)%a = new_accel
     end do
+    !$omp end parallel do
   end subroutine PC_verlet_correct_accel
 
   subroutine set_accel(self)
     class(PC_t), intent(inout) :: self
     integer                    :: ll
 
+    !$omp parallel do
     do ll = 1, self%n_part
        self%particles(ll)%a = self%accel_function(self%particles(ll))
     end do
+    !$omp end parallel do
   end subroutine set_accel
 
   subroutine clean_up(self)
