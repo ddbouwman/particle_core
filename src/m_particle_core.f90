@@ -38,6 +38,9 @@ module m_particle_core
   !> Buffer size for advancing particle in parallel (not important for users)
   integer, parameter :: PC_advance_buf_size = 1000
 
+  !> Initial size of an event list (will be automatically increased when required)
+  integer, parameter :: PC_event_list_init_size = 10*1000
+
   !> The particle type
   type, public :: PC_part_t
      real(dp) :: x(3)   = 0     !< Position
@@ -47,9 +50,17 @@ module m_particle_core
      real(dp) :: t_left = 0     !< Propagation time left
   end type PC_part_t
 
-  type, public :: callback_t
-     procedure(coll_callback_p), pointer, nopass :: ptr => null()
-  end type callback_t
+  !> An event (particle collision)
+  type, public :: PC_event_t
+     type(PC_part_t) :: part !< Particle that had collision
+     integer         :: cix  !< Collision index
+  end type PC_event_t
+
+  !> A list of events (particle collisions)
+  type, public :: PC_events_t
+     integer                       :: n_stored
+     type(PC_event_t), allocatable :: list(:)
+  end type PC_events_t
 
   !> Particle core type, storing the particles and the collisions
   type, public                    :: PC_t
@@ -65,11 +76,8 @@ module m_particle_core
      !> Number of collisions
      integer                      :: n_colls
 
-     !> Indices of ionization  collisions
-     integer, allocatable         :: ionization_colls(:)
-
-     !> Indices of attachment collisions
-     integer, allocatable         :: attachment_colls(:)
+     !> Whether a collision should be stored as an event
+     logical, allocatable         :: coll_is_event(:)
 
      !> Lookup table with collision rates
      type(lookup_table_t)         :: rate_lt
@@ -91,20 +99,11 @@ module m_particle_core
      !> they are outside the computational domain
      procedure(p_to_logic_f), pointer, nopass :: outside_check  => null()
 
-     !> If assigned, call this method after an ionization has occurred
-     type(callback_t), allocatable :: ionization_callbacks(:)
-
-     !> If assigned, call this method after an attachment has occurred
-     type(callback_t), allocatable :: attachment_callbacks(:)
-
      !> If assigned, use this method as the particle mover
      procedure(subr_mover), pointer, nopass   :: particle_mover => null()
 
      !> The method to get particle accelerations
      procedure(p_to_r3_f), pointer, nopass    :: accel_function => null()
-
-     ! Separate rng data for OpenMP performance
-     integer                      :: separator(100)
 
    contains
 
@@ -145,9 +144,6 @@ module m_particle_core
 
      procedure, non_overridable :: init_from_file
      procedure, non_overridable :: to_file
-
-     procedure, non_overridable :: add_ionization_callback
-     procedure, non_overridable :: add_attachment_callback
   end type PC_t
 
   type, abstract, public :: PC_bin_t
@@ -157,14 +153,6 @@ module m_particle_core
   end type PC_bin_t
 
   abstract interface
-
-     !> Interface for callbacks, which may for example add particles
-     subroutine coll_callback_p(self, my_part, c_ix, c_type)
-       import
-       class(PC_t), intent(in)     :: self
-       type(PC_part_t), intent(in) :: my_part
-       integer, intent(in)         :: c_ix, c_type
-     end subroutine coll_callback_p
 
      subroutine p_to_r3_p(my_part, my_vec)
        import
@@ -237,13 +225,6 @@ contains
     self%mass   = mass
     self%n_part = 0
 
-    ! No callbacks by default
-    if (.not. allocated(self%ionization_callbacks)) &
-         allocate(self%ionization_callbacks(0))
-
-    if (.not. allocated(self%attachment_callbacks)) &
-         allocate(self%attachment_callbacks(0))
-
     if (present(rng_seed)) then
        rng_seed_8byte = transfer(rng_seed, rng_seed_8byte)
        call self%rng%set_seed(rng_seed_8byte)
@@ -258,70 +239,7 @@ contains
     end if
 
     call self%set_coll_rates(cross_secs, mass, max_en_eV, lookup_table_size)
-
-    call get_colls_of_type(self, CS_ionize_t, self%ionization_colls)
-    call get_colls_of_type(self, CS_attach_t, self%attachment_colls)
   end subroutine initialize
-
-  !> Adds an ionization callback to current list of ionization callbacks
-  subroutine add_ionization_callback(self,new_ionization_callback_pptr)
-    class(PC_t), intent(inout)    :: self
-    procedure(coll_callback_p)    :: new_ionization_callback_pptr
-
-    type(callback_t)              :: new_ionization_callback
-    type(callback_t), allocatable :: old_callback_list(:)
-    integer                       :: nn
-
-    new_ionization_callback%ptr => new_ionization_callback_pptr
-    if (allocated(self%ionization_callbacks)) then
-      nn = size(self%ionization_callbacks)
-      if (nn.gt.0) then
-        allocate(old_callback_list(nn))
-        old_callback_list = self%ionization_callbacks
-        deallocate(self%ionization_callbacks)
-        allocate(self%ionization_callbacks(nn+1))
-        self%ionization_callbacks(1:nn)=old_callback_list
-        self%ionization_callbacks(nn+1)=new_ionization_callback
-      elseif (nn.eq.0) then
-        deallocate(self%ionization_callbacks)
-        allocate(self%ionization_callbacks(1))
-        self%ionization_callbacks = new_ionization_callback
-      end if
-    else
-      allocate(self%ionization_callbacks(1))
-      self%ionization_callbacks = new_ionization_callback
-    end if
-  end subroutine add_ionization_callback
-
-  !> Adds an attachment callback to current list of attachment callbacks
-  subroutine add_attachment_callback(self,new_attachment_callback_pptr)
-    class(PC_t), intent(inout)    :: self
-    procedure(coll_callback_p)    :: new_attachment_callback_pptr
-
-    type(callback_t)              :: new_attachment_callback
-    type(callback_t), allocatable :: old_callback_list(:)
-    integer                       :: nn
-
-    new_attachment_callback%ptr => new_attachment_callback_pptr
-    if (allocated(self%attachment_callbacks)) then
-      nn = size(self%attachment_callbacks)
-      if (nn.gt.0) then
-        allocate(old_callback_list(nn))
-        old_callback_list = self%attachment_callbacks
-        deallocate(self%attachment_callbacks)
-        allocate(self%attachment_callbacks(nn+1))
-        self%attachment_callbacks(1:nn)=old_callback_list
-        self%attachment_callbacks(nn+1)=new_attachment_callback
-      elseif (nn.eq.0) then
-        deallocate(self%attachment_callbacks)
-        allocate(self%attachment_callbacks(1))
-        self%attachment_callbacks = new_attachment_callback
-      end if
-    else
-      allocate(self%attachment_callbacks(1))
-      self%attachment_callbacks = new_attachment_callback
-    end if
-  end subroutine add_attachment_callback
 
   !> Initialization routine for the particle module
   subroutine init_from_file(self, param_file, lt_file, rng_seed)
@@ -357,9 +275,6 @@ contains
     else
        call self%rng%set_seed([8972134_i8, 21384823409_i8])
     end if
-
-    call get_colls_of_type(self, CS_ionize_t, self%ionization_colls)
-    call get_colls_of_type(self, CS_attach_t, self%attachment_colls)
   end subroutine init_from_file
 
   subroutine to_file(self, param_file, lt_file)
@@ -419,47 +334,31 @@ contains
     self%particles(1:self%n_part) = parts_copy
   end subroutine resize_part_list
 
-  subroutine advance(self, dt)
-    class(PC_t), intent(inout) :: self
-    real(dp), intent(in)       :: dt
-    integer                    :: n, n_steps
-    real(dp)                   :: dt_step
+  subroutine check_events_allocated(self, events)
+    class(PC_t), intent(in)          :: self
+    type(PC_events_t), intent(inout) :: events
 
-    call limit_advance_dt(self, dt, n_steps, dt_step)
-
-    do n = 1, n_steps
-       call advance_step(self, dt_step)
-    end do
-
-    call self%clean_up()
-  end subroutine advance
-
-  subroutine advance_step(self, dt)
-    class(PC_t), intent(inout) :: self
-    real(dp), intent(in)       :: dt
-    integer                    :: n, n_new
-    type(PC_part_t)            :: p_buf(PC_advance_buf_size)
-
-    self%particles(1:self%n_part)%t_left = dt
-    n = 1
-
-    do while (n <= self%n_part)
-       call self%move_and_collide(self%particles(n), &
-            self%rng, p_buf, n_new)
-
-       if (self%particles(n)%w <= PC_dead_weight) then
-          call self%remove_part(n)
+    if (any(self%coll_is_event(:))) then
+       if (.not. allocated(events%list)) then
+          allocate(events%list(PC_event_list_init_size))
        end if
+    end if
+  end subroutine check_events_allocated
 
-       if (n_new > 0) then
-          call self%check_space(self%n_part + n_new)
-          self%particles(self%n_part+1:self%n_part+n_new) = &
-               p_buf(1:n_new)
-          self%n_part = self%n_part + n_new
-       end if
-       n = n + 1
-    end do
-  end subroutine advance_step
+  subroutine ensure_events_storage(events, n_new)
+    type(PC_events_t), intent(inout) :: events
+    integer, intent(in)              :: n_new
+    integer                          :: n_stored
+    type(PC_events_t)                :: cpy
+
+    n_stored = events%n_stored
+    if (size(events%list) < n_stored + n_new) then
+       cpy = events
+       deallocate(events%list)
+       allocate(events%list(2 * (n_stored + n_new)))
+       events%list(1:n_stored) = cpy%list(1:n_stored)
+    end if
+  end subroutine ensure_events_storage
 
   !> Limit advance time so that not too many collision happen per particle per
   !> time step (otherwise the buffer for new particles could overflow)
@@ -471,25 +370,79 @@ contains
     real(dp)                :: max_dt
 
     if (dt < 0) error stop "dt < 0"
-
     max_dt = 0.25_dp * self%inv_max_rate * PC_advance_buf_size
-    n_steps = ceiling(dt / max_dt)
+    n_steps = max(1, ceiling(dt / max_dt))
     dt_step = dt / n_steps
   end subroutine limit_advance_dt
 
-  subroutine advance_openmp(self, dt)
-    use omp_lib
-    class(PC_t), intent(inout) :: self
-    real(dp), intent(in)       :: dt
-    integer                    :: n, n_steps
-    real(dp)                   :: dt_step
-    type(prng_t)               :: prng
+  subroutine advance(self, dt, events)
+    class(PC_t), intent(inout)       :: self
+    real(dp), intent(in)             :: dt
+    type(PC_events_t), intent(inout) :: events
+    integer                          :: n, n_steps
+    real(dp)                         :: dt_step
 
+    call limit_advance_dt(self, dt, n_steps, dt_step)
+    call check_events_allocated(self, events)
+
+    do n = 1, n_steps
+       call advance_step(self, dt_step, events)
+    end do
+
+    call self%clean_up()
+  end subroutine advance
+
+  subroutine advance_step(self, dt, events)
+    class(PC_t), intent(inout)       :: self
+    real(dp), intent(in)             :: dt
+    type(PC_events_t), intent(inout) :: events
+    integer                          :: i, n, n_new, n_events
+    type(PC_part_t)                  :: p_buf(PC_advance_buf_size)
+    type(PC_event_t)                 :: e_buf(PC_advance_buf_size)
+
+    self%particles(1:self%n_part)%t_left = dt
+    n = 1
+
+    do while (n <= self%n_part)
+       call self%move_and_collide(self%particles(n), &
+            self%rng, p_buf, n_new, e_buf, n_events)
+
+       if (self%particles(n)%w <= PC_dead_weight) then
+          call self%remove_part(n)
+       end if
+
+       if (n_new > 0) then
+          call self%check_space(self%n_part + n_new)
+          self%particles(self%n_part+1:self%n_part+n_new) = &
+               p_buf(1:n_new)
+          self%n_part = self%n_part + n_new
+       end if
+
+       if (n_events > 0) then
+          call ensure_events_storage(events, n_events)
+          i = events%n_stored
+          events%list(i+1:i+n_events) = e_buf(1:n_events)
+       end if
+
+       n = n + 1
+    end do
+  end subroutine advance_step
+
+  subroutine advance_openmp(self, dt, events)
+    use omp_lib
+    class(PC_t), intent(inout)       :: self
+    real(dp), intent(in)             :: dt
+    type(PC_events_t), intent(inout) :: events
+    integer                          :: n, n_steps
+    real(dp)                         :: dt_step
+    type(prng_t)                     :: prng
+
+    call check_events_allocated(self, events)
     call limit_advance_dt(self, dt, n_steps, dt_step)
     call prng%init_parallel(omp_get_max_threads(), self%rng)
 
     do n = 1, n_steps
-       call advance_openmp_step(self, dt_step, prng)
+       call advance_openmp_step(self, dt_step, prng, events)
     end do
 
     call self%clean_up()
@@ -499,78 +452,101 @@ contains
 
   end subroutine advance_openmp
 
-  subroutine advance_openmp_step(self, dt, prng)
+  subroutine advance_openmp_step(self, dt, prng, events)
     use omp_lib
-    class(PC_t), intent(inout)  :: self
-    real(dp), intent(in)        :: dt
-    type(prng_t), intent(inout) :: prng
-    integer                     :: n, i_buf, i_rm, n_new, tid, n_lo, n_hi
-    integer                     :: n_part, i
-    type(PC_part_t)             :: p_buf(PC_advance_buf_size)
-    integer                     :: rm_buf(PC_advance_buf_size)
+    class(PC_t), intent(inout)       :: self
+    real(dp), intent(in)             :: dt
+    type(prng_t), intent(inout)      :: prng
+    type(PC_events_t), intent(inout) :: events
+    integer                          :: n, i_pbuf, i_rmbuf, n_new, tid, n_lo, n_hi
+    integer                          :: i, n_events, i_ebuf
+    type(PC_part_t)                  :: p_buf(PC_advance_buf_size)
+    integer                          :: rm_buf(PC_advance_buf_size)
+    type(PC_event_t)                 :: e_buf(PC_advance_buf_size)
 
     self%particles(1:self%n_part)%t_left = dt
 
-    !$omp parallel private(n, tid, p_buf, i_buf, rm_buf, i_rm, n_new, n_lo, n_hi) &
-    !$omp private(n_part, i)
+    !$omp parallel private(n, tid, p_buf, i_pbuf, rm_buf, i_rmbuf, n_new, n_lo, n_hi) &
+    !$omp private(i, e_buf, i_ebuf, n_events)
     tid = omp_get_thread_num() + 1
-    i_buf = 0
-    i_rm = 0
+    i_pbuf = 0
+    i_rmbuf = 0
     n_lo = 1
 
     do
        n_hi = self%n_part
        !$omp do
        do n = n_lo, n_hi
-          call self%move_and_collide(self%particles(n), &
-               prng%rngs(tid), p_buf(i_buf+1:), n_new)
-          i_buf = i_buf + n_new
+          call self%move_and_collide(self%particles(n), prng%rngs(tid), &
+               p_buf(i_pbuf+1:), n_new, e_buf(i_ebuf+1:), n_events)
+          i_pbuf = i_pbuf + n_new
+          i_ebuf = i_ebuf + n_events
 
           if (self%particles(n)%w <= PC_dead_weight) then
-             rm_buf(i_rm+1) = n
-             i_rm = i_rm + 1
+             rm_buf(i_rmbuf+1) = n
+             i_rmbuf = i_rmbuf + 1
           end if
 
           ! Clean up buffers when they get full
-          if (i_buf > int(0.5_dp * PC_advance_buf_size)) then
+          if (i_pbuf > int(0.5_dp * PC_advance_buf_size)) then
              !$omp critical
-             n_part = self%n_part
-             self%n_part = self%n_part + i_buf
+             i = self%n_part
+             self%n_part = self%n_part + i_pbuf
              !$omp end critical
-             call self%check_space(n_part + i_buf)
-             self%particles(n_part+1:n_part+i_buf) = p_buf(1:i_buf)
-             i_buf = 0
+             call self%check_space(i + i_pbuf)
+             self%particles(i+1:i+i_pbuf) = p_buf(1:i_pbuf)
+             i_pbuf = 0
           end if
 
-          if (i_rm > int(0.5_dp * PC_advance_buf_size)) then
+          if (i_rmbuf > int(0.5_dp * PC_advance_buf_size)) then
              !$omp critical
-             do i = 1, i_rm
+             do i = 1, i_rmbuf
                 call self%remove_part(rm_buf(i))
              end do
              !$omp end critical
-             i_rm = 0
+             i_rmbuf = 0
+          end if
+
+          if (i_ebuf > int(0.5_dp * PC_advance_buf_size)) then
+             !$omp critical
+             i = events%n_stored
+             call ensure_events_storage(events, i_ebuf)
+             events%n_stored = events%n_stored + i_ebuf
+             !$omp end critical
+             events%list(i+1:i+i_ebuf) = e_buf(1:i_ebuf)
+             i_ebuf = 0
           end if
        end do
        !$omp end do
 
        ! Ensure buffers are empty at the end of the loop
-       if (i_buf > 0) then
+       if (i_pbuf > 0) then
           !$omp critical
-          n_part = self%n_part
-          self%n_part = self%n_part + i_buf
+          i = self%n_part
+          self%n_part = self%n_part + i_pbuf
           !$omp end critical
-          call self%check_space(n_part + i_buf)
-          self%particles(n_part+1:n_part+i_buf) = p_buf(1:i_buf)
-          i_buf = 0
+          call self%check_space(i + i_pbuf)
+          self%particles(i+1:i+i_pbuf) = p_buf(1:i_pbuf)
+          i_pbuf = 0
        end if
 
-       if (i_rm > 0) then
+       if (i_rmbuf > 0) then
           !$omp critical
-          do i = 1, i_rm
+          do i = 1, i_rmbuf
              call self%remove_part(rm_buf(i))
           end do
           !$omp end critical
-          i_rm = 0
+          i_rmbuf = 0
+       end if
+
+       if (i_ebuf > 0) then
+          !$omp critical
+          i = events%n_stored
+          call ensure_events_storage(events, i_ebuf)
+          events%n_stored = events%n_stored + i_ebuf
+          !$omp end critical
+          events%list(i+1:i+i_ebuf) = e_buf(1:i_ebuf)
+          i_ebuf = 0
        end if
 
        ! Ensure all particles have been added before the test below
@@ -591,19 +567,22 @@ contains
   !>
   !> @todo technically, intent(in) for self and intent(inout) for part is
   !> illegal (unless we make a copy of a particle)
-  subroutine move_and_collide(self, part, rng, new_part, n_new)
+  subroutine move_and_collide(self, part, rng, new_part, n_new, events, n_events)
     use m_cross_sec
-    class(PC_t), intent(in)        :: self
-    type(RNG_t), intent(inout)     :: rng
-    type(PC_part_t), intent(inout) :: part
-    type(PC_part_t), intent(inout) :: new_part(:)
-    integer, intent(out)           :: n_new
+    class(PC_t), intent(in)         :: self
+    type(RNG_t), intent(inout)      :: rng
+    type(PC_part_t), intent(inout)  :: part
+    type(PC_part_t), intent(inout)  :: new_part(:)
+    integer, intent(out)            :: n_new
+    type(PC_event_t), intent(inout) :: events(:)
+    integer, intent(out)            :: n_events
 
-    integer            :: cIx, cType, n, n_coll_out
+    integer            :: cIx, cType, n_coll_out
     real(dp)           :: coll_time, new_vel
     type(PC_part_t)    :: coll_out(PC_coll_max_part_out)
 
-    n_new = 0
+    n_new    = 0
+    n_events = 0
 
     do
        ! Get the next collision time
@@ -636,12 +615,14 @@ contains
           ! Perform the corresponding collision
           cType    = self%colls(cIx)%type
 
+          if (self%coll_is_event(cIx)) then
+             n_events              = n_events + 1
+             events(n_events)%part = part
+             events(n_events)%cix  = cix
+          end if
+
           select case (cType)
           case (CS_attach_t)
-             do n = 1, size(self%attachment_callbacks)
-                call self%attachment_callbacks(n)%ptr(self, &
-                     part, cIx, cType)
-             end do
              call attach_collision(part, coll_out, &
                   n_coll_out, self%colls(cIx), rng)
           case (CS_elastic_t)
@@ -651,10 +632,6 @@ contains
              call excite_collision(part, coll_out, &
                   n_coll_out, self%colls(cIx), rng)
           case (CS_ionize_t)
-             do n = 1, size(self%ionization_callbacks)
-                call self%ionization_callbacks(n)%ptr(self, &
-                     part, cIx, cType)
-             end do
              call ionization_collision(part, coll_out, &
                   n_coll_out, self%colls(cIx), rng)
           case default
@@ -1084,6 +1061,8 @@ contains
     n_colls      = size(cross_secs)
     self%n_colls = n_colls
     allocate(self%colls(n_colls))
+    allocate(self%coll_is_event(n_colls))
+    self%coll_is_event(:) = .false.
 
     ! Set a range of velocities
     do ix = 1, table_size

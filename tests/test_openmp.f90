@@ -22,10 +22,10 @@ program test_m_particle_core
   real(dp), parameter     :: init_accel(3) = (/0.0_dp, 0.0_dp, 1.0e12_dp/)
   real(dp)                :: norm_cross_sec, mass_ratio
   real(dp)                :: pos(3), vel(3), accel(3), weight
-  real(dp)                :: bin_args(1)
   integer                 :: ll, step, num_colls
   type(CS_t), allocatable :: cross_secs(:)
   type(PC_t)              :: pc
+  type(PC_events_t)       :: events
 
   print *, "Testing m_particle_core.f90 implementation"
 
@@ -65,7 +65,7 @@ program test_m_particle_core
      print *, "at step", step, " and time ", (step-1) * delta_t
      call print_stats()
 
-     call pc%advance_openmp(delta_t)
+     call pc%advance_openmp(delta_t, events)
   end do
 
   call print_stats()

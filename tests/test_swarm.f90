@@ -25,6 +25,7 @@ program test_m_particle_core
   integer                 :: ll, step, rng_seed(4)
   type(CS_t), allocatable :: cross_secs(:)
   type(PC_t)              :: pc
+  type(PC_events_t)       :: events
 
   print *, "Testing m_particle_core.f90 implementation"
 
@@ -55,7 +56,7 @@ program test_m_particle_core
   do step = 1, max_num_steps
      write(*, '(F10.2,A,I10,A)') (step * 100.0_dp)/max_num_steps, '%, ', &
           pc%get_num_sim_part(), ' particles'
-     call pc%advance_openmp(delta_t)
+     call pc%advance_openmp(delta_t, events)
   end do
 
   call print_stats()

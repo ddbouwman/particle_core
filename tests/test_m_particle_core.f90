@@ -28,6 +28,7 @@ program test_m_particle_core
   type(CS_t), allocatable :: cross_secs(:)
   integer, parameter :: n_pc = 4
   type(PC_t) :: pmodels(n_pc)
+  type(PC_events_t) :: events
 
   print *, "Testing m_particle_core.f90 implementation"
 
@@ -74,7 +75,7 @@ program test_m_particle_core
 
      !$omp parallel do
      do i = 1, n_pc
-        call pmodels(i)%advance(delta_t)
+        call pmodels(i)%advance(delta_t, events)
      end do
      !$omp end parallel do
   end do
