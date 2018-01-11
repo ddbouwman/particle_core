@@ -138,7 +138,9 @@ module m_particle_core
      procedure, non_overridable :: get_coll_rates
      procedure, non_overridable :: check_space
 
+     procedure, non_overridable :: sort
      procedure, non_overridable :: merge_and_split
+     procedure, non_overridable :: merge_and_split_range
      procedure, non_overridable :: histogram
 
      procedure, non_overridable :: get_num_colls
@@ -190,6 +192,22 @@ module m_particle_core
        type(PC_part_t), intent(inout) :: part
        real(dp), intent(in)           :: dt
      end subroutine subr_mover
+
+     subroutine sub_merge(part_a, part_b, part_out, rng)
+       import
+       type(PC_part_t), intent(in)  :: part_a, part_b
+       type(PC_part_t), intent(out) :: part_out
+       type(RNG_t), intent(inout)   :: rng
+     end subroutine sub_merge
+
+     subroutine sub_split(part_a, w_ratio, part_out, n_part_out, rng)
+       import
+       type(PC_part_t), intent(in)    :: part_a
+       real(dp), intent(in)           :: w_ratio
+       type(PC_part_t), intent(inout) :: part_out(:)
+       integer, intent(inout)         :: n_part_out
+       type(RNG_t), intent(inout)     :: rng
+     end subroutine sub_split
   end interface
 
   ! Public procedures
@@ -1206,29 +1224,13 @@ contains
     class(PC_t), intent(inout) :: self
     real(dp), intent(in)       :: v_fac, max_merge_distance
     logical, intent(in)        :: x_mask(3), use_v_norm
-
-    interface
-       subroutine pptr_merge(part_a, part_b, part_out, rng)
-         import
-         type(PC_part_t), intent(in)  :: part_a, part_b
-         type(PC_part_t), intent(out) :: part_out
-         type(RNG_t), intent(inout)   :: rng
-       end subroutine pptr_merge
-
-       subroutine pptr_split(part_a, w_ratio, part_out, n_part_out, rng)
-         import
-         type(PC_part_t), intent(in)    :: part_a
-         real(dp), intent(in)           :: w_ratio
-         type(PC_part_t), intent(inout) :: part_out(:)
-         integer, intent(inout)         :: n_part_out
-         type(RNG_t), intent(inout)     :: rng
-       end subroutine pptr_split
-    end interface
+    procedure(sub_merge)       :: pptr_merge
+    procedure(sub_split)       :: pptr_split
 
     procedure(p_to_r_f)    :: weight_func
 
     integer, parameter     :: num_neighbors  = 1
-    integer, parameter     :: n_part_out_max = 16
+    integer, parameter     :: n_part_out_max = 2
     real(dp), parameter    :: large_ratio    = 1.5_dp
     real(dp), parameter    :: small_ratio    = 1 / large_ratio
     type(kdtree2), pointer :: kd_tree
@@ -1241,7 +1243,7 @@ contains
     integer               :: i, ix, neighbor_ix
     integer               :: n_part_out
     logical, allocatable  :: already_merged(:)
-    integer, allocatable  :: sorted_ixs(:), coord_ixs(:)
+    integer, allocatable  :: sorted_ixs(:)
     real(dp), allocatable :: coord_data(:, :), weight_ratios(:)
     type(PC_part_t)       :: part_out(n_part_out_max)
     real(dp)              :: dist
@@ -1264,7 +1266,6 @@ contains
     if (use_v_norm) n_coords = n_coords - 2
 
     allocate(coord_data(n_coords, num_merge))
-    allocate(coord_ixs(n_coords))
     allocate(already_merged(num_merge))
     already_merged = .false.
     n_too_far      = 0
@@ -1333,6 +1334,159 @@ contains
     ! print *, "clean up"
     call self%clean_up()
   end subroutine merge_and_split
+
+  !> Should be thread safe, so it can be called in parallel as long as the
+  !> ranges [i0:i1] don't overlap.
+  subroutine merge_and_split_range(self, i0, i1, x_mask, v_fac, use_v_norm, &
+       weight_func, max_merge_distance, pptr_merge, pptr_split)
+    use m_mrgrnk
+    use kdtree2_module
+    class(PC_t), intent(inout) :: self
+    integer, intent(in)        :: i0, i1
+    real(dp), intent(in)       :: v_fac, max_merge_distance
+    logical, intent(in)        :: x_mask(3), use_v_norm
+    procedure(sub_merge)       :: pptr_merge
+    procedure(sub_split)       :: pptr_split
+    procedure(p_to_r_f)        :: weight_func
+
+    integer, parameter     :: num_neighbors  = 1
+    integer, parameter     :: n_part_out_max = 2
+    real(dp), parameter    :: large_ratio    = 1.5_dp
+    real(dp), parameter    :: small_ratio    = 1 / large_ratio
+    integer, parameter     :: min_merge      = 20
+    type(kdtree2), pointer :: kd_tree
+    type(kdtree2_result)   :: kd_results(num_neighbors)
+
+    integer                      :: n_x_coord, n_coords
+    integer                      :: num_part, num_merge, num_split
+    integer                      :: n_too_far, n_free, i_pbuf
+    integer                      :: o_ix, o_nn_ix
+    integer                      :: i, ix, neighbor_ix
+    integer                      :: n_part_out
+    logical, allocatable         :: already_merged(:)
+    integer, allocatable         :: sorted_ixs(:), free_ixs(:)
+    real(dp), allocatable        :: coord_data(:, :), weight_ratios(:)
+    type(PC_part_t), allocatable :: p_buf(:)
+    type(PC_part_t)              :: part_out(n_part_out_max)
+    real(dp)                     :: dist
+
+    num_part = i1 - i0 + 1
+    allocate(weight_ratios(i0:i1))
+
+    do ix = i0, i1
+       weight_ratios(ix) = self%particles(ix)%w / &
+            weight_func(self%particles(ix))
+    end do
+
+    num_merge = count(weight_ratios <= small_ratio)
+    num_split = count(weight_ratios >= large_ratio)
+
+    ! Exit if there is nothing to do
+    if (num_merge < min_merge .and. num_split == 0) return
+
+    ! Sort particles by their relative weight
+    allocate(sorted_ixs(num_part))
+    call mrgrnk(weight_ratios, sorted_ixs)
+    sorted_ixs = sorted_ixs + i0 - 1
+
+    n_free = 0                  ! Will be checked at the end
+
+    ! Create a k-d tree if there are enough particles to be merged
+    if (num_merge > min_merge) then
+       n_x_coord         = count(x_mask)
+       n_coords          = n_x_coord + 3
+       if (use_v_norm) n_coords = n_coords - 2
+
+       allocate(free_ixs(num_merge/2))
+       allocate(coord_data(n_coords, num_merge))
+       allocate(already_merged(num_merge))
+
+       already_merged(:) = .false.
+       n_too_far         = 0
+
+       do ix = 1, num_merge
+          o_ix = sorted_ixs(ix)
+          coord_data(1:n_x_coord, ix) = pack(self%particles(o_ix)%x, x_mask)
+          if (use_v_norm) then
+             coord_data(n_x_coord+1, ix) = v_fac * norm2(self%particles(o_ix)%v)
+          else
+             coord_data(n_x_coord+1:, ix) = v_fac * self%particles(o_ix)%v
+          end if
+       end do
+
+       ! Create k-d tree
+       kd_tree => kdtree2_create(coord_data)
+
+       ! Merge particles
+       do ix = 1, num_merge
+          if (already_merged(ix)) cycle
+
+          call kdtree2_n_nearest_around_point(kd_tree, idxin=ix, &
+               nn=num_neighbors, correltime=1, results=kd_results)
+          neighbor_ix = kd_results(1)%idx
+
+          if (already_merged(neighbor_ix)) cycle
+
+          dist = norm2(coord_data(:, ix)-coord_data(:, neighbor_ix))
+          if (dist > max_merge_distance) cycle
+
+          ! Get indices in the original particle list
+          o_ix = sorted_ixs(ix)
+          o_nn_ix = sorted_ixs(neighbor_ix)
+
+          ! Merge, then remove neighbor
+          call pptr_merge(self%particles(o_ix), self%particles(o_nn_ix), &
+               part_out(1), self%rng)
+          self%particles(o_ix) = part_out(1)
+          n_free               = n_free + 1
+          free_ixs(n_free)     = o_nn_ix
+          already_merged((/ix, neighbor_ix/)) = .true.
+       end do
+
+       call kdtree2_destroy(kd_tree)
+    end if
+
+    ! Split particles
+    if (num_split > 0) then
+       allocate(p_buf(num_split))
+       i_pbuf            = 0
+
+       do ix = num_part - num_split + 1, num_part
+          o_ix = sorted_ixs(ix)
+          call pptr_split(self%particles(o_ix), weight_ratios(o_ix), part_out, &
+               n_part_out, self%rng)
+          self%particles(o_ix) = part_out(1)
+
+          if (n_free > 0) then
+             i = free_ixs(n_free)
+             n_free = n_free - 1
+             self%particles(i) = part_out(2)
+          else
+             i_pbuf = i_pbuf + 1
+             p_buf(i_pbuf) = part_out(2)
+          end if
+       end do
+
+       if (i_pbuf > 0) then
+          !$omp critical
+          i = self%n_part
+          self%n_part = self%n_part + i_pbuf
+          !$omp end critical
+          call self%check_space(i + i_pbuf)
+          self%particles(i+1:i+i_pbuf) = p_buf(1:i_pbuf)
+       end if
+    end if
+
+    if (n_free > 0) then
+       !$omp critical
+       do i = 1, n_free
+          call self%remove_part(free_ixs(i))
+       end do
+       !$omp end critical
+    end if
+
+    ! Users have to call clean_up afterwards!
+  end subroutine merge_and_split_range
 
   ! Merge two particles into part_a, should remove part_b afterwards
   subroutine PC_merge_part_rxv(part_a, part_b, part_out, rng)
