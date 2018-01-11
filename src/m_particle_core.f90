@@ -43,11 +43,13 @@ module m_particle_core
 
   !> The particle type
   type, public :: PC_part_t
-     real(dp) :: x(3)   = 0     !< Position
-     real(dp) :: v(3)   = 0     !< Velocity
-     real(dp) :: a(3)   = 0     !< Acceleration
-     real(dp) :: w      = 0     !< Weight
-     real(dp) :: t_left = 0     !< Propagation time left
+     integer  :: ptype  = 0 !< Type of particle (not used yet)
+     integer  :: id     = 0 !< Can be used to e.g. optimize code
+     real(dp) :: x(3)   = 0 !< Position
+     real(dp) :: v(3)   = 0 !< Velocity
+     real(dp) :: a(3)   = 0 !< Acceleration
+     real(dp) :: w      = 0 !< Weight
+     real(dp) :: t_left = 0 !< Propagation time left
   end type PC_part_t
 
   !> An event (particle collision)
