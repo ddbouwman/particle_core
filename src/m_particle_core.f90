@@ -41,6 +41,10 @@ module m_particle_core
   !> Initial size of an event list (will be automatically increased when required)
   integer, parameter :: PC_event_list_init_size = 10*1000
 
+  !> Integer indicating the 'collision type' of events in which particles went
+  !> outside the domain
+  integer, parameter :: PC_particle_went_out = -1
+
   !> The particle type
   type, public :: PC_part_t
      integer  :: ptype  = 0 !< Type of particle (not used yet)
@@ -98,15 +102,16 @@ module m_particle_core
      !> Maximum time step for particle mover
      real(dp)                     :: dt_max = huge(1.0_dp)
 
-     !> If assigned, call this method after moving particles, to check whether
-     !> they are outside the computational domain
-     procedure(p_to_logic_f), pointer, nopass :: outside_check  => null()
+     !> If assigned call this method after moving particles to check whether
+     !> they are outside the computational domain (then it should return a
+     !> positive value)
+     procedure(p_to_int_f), pointer, nopass :: outside_check  => null()
 
      !> If assigned, use this method as the particle mover
-     procedure(subr_mover), pointer, nopass   :: particle_mover => null()
+     procedure(subr_mover), pointer, nopass :: particle_mover => null()
 
      !> The method to get particle accelerations
-     procedure(p_to_r3_f), pointer, nopass    :: accel_function => null()
+     procedure(p_to_r3_f), pointer, nopass :: accel_function => null()
 
    contains
 
@@ -180,6 +185,11 @@ module m_particle_core
        import
        type(PC_part_t), intent(in) :: my_part
      end function p_to_logic_f
+
+     integer function p_to_int_f(my_part)
+       import
+       type(PC_part_t), intent(in) :: my_part
+     end function p_to_int_f
 
      integer function bin_f(binner, my_part)
        import
@@ -622,8 +632,13 @@ contains
        call self%particle_mover(part, coll_time)
 
        if (associated(self%outside_check)) then
-          if (self%outside_check(part)) then
-             part%w = PC_dead_weight
+          cIx = self%outside_check(part)
+          if (cIx > 0) then
+             n_events               = n_events + 1
+             events(n_events)%part  = part
+             events(n_events)%cix   = cIx
+             events(n_events)%ctype = PC_particle_went_out
+             part%w                 = PC_dead_weight
              return
           end if
        end if
@@ -679,8 +694,13 @@ contains
     call self%particle_mover(part, part%t_left)
 
     if (associated(self%outside_check)) then
-       if (self%outside_check(part)) then
-          part%w = PC_dead_weight
+       cIx = self%outside_check(part)
+       if (cIx > 0) then
+          n_events               = n_events + 1
+          events(n_events)%part  = part
+          events(n_events)%cix   = cIx
+          events(n_events)%ctype = PC_particle_went_out
+          part%w                 = PC_dead_weight
        end if
     end if
 
