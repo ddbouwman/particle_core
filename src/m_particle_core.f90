@@ -915,15 +915,20 @@ contains
     self%particles(self%n_part) = part
   end subroutine add_part
 
-  subroutine create_part(self, x, v, a, weight, t_left)
+  subroutine create_part(self, x, v, a, weight, t_left, id, ptype)
     class(PC_t), intent(inout) :: self
     real(dp), intent(IN)       :: x(3), v(3), a(3), weight, t_left
     type(PC_part_t)            :: my_part
+    integer, intent(in), optional :: id, ptype
     my_part%x      = x
     my_part%v      = v
     my_part%a      = a
     my_part%w      = weight
     my_part%t_left = t_left
+
+    if (present(id)) my_part%id = id
+    if (present(ptype)) my_part%ptype = ptype
+
     call self%add_part(my_part)
   end subroutine create_part
 
