@@ -474,9 +474,8 @@ contains
 
     do n = 1, n_steps
        call advance_openmp_step(self, dt_step, prng, events)
+       call self%clean_up()
     end do
-
-    call self%clean_up()
 
     ! Update self%rng (otherwise it would always stay the same)
     call self%rng%set_seed([prng%rngs(1)%int_8(), prng%rngs(1)%int_8()])
@@ -499,10 +498,11 @@ contains
 
     !$omp parallel private(n, tid, p_buf, i_pbuf, rm_buf, i_rmbuf, n_new, n_lo, n_hi) &
     !$omp private(i, e_buf, i_ebuf, n_events)
-    tid = omp_get_thread_num() + 1
-    i_pbuf = 0
+    tid     = omp_get_thread_num() + 1
+    i_pbuf  = 0
     i_rmbuf = 0
-    n_lo = 1
+    i_ebuf  = 0
+    n_lo    = 1
 
     do
        n_hi = self%n_part
@@ -635,7 +635,7 @@ contains
           cIx = self%outside_check(part)
           if (cIx > 0) then
              call add_event(events, n_events, part, cIx, PC_particle_went_out)
-             part%w                 = PC_dead_weight
+             part%w = PC_dead_weight
              return
           end if
        end if
@@ -1070,7 +1070,7 @@ contains
     end do
   end subroutine compute_scalar_sum
 
-  real(dp) function PC_v_to_en(v, mass)
+  pure real(dp) function PC_v_to_en(v, mass)
     real(dp), intent(in) :: v(3), mass
     PC_v_to_en = 0.5_dp * mass * sum(v**2)
   end function PC_v_to_en
