@@ -634,10 +634,7 @@ contains
        if (associated(self%outside_check)) then
           cIx = self%outside_check(part)
           if (cIx > 0) then
-             n_events               = n_events + 1
-             events(n_events)%part  = part
-             events(n_events)%cix   = cIx
-             events(n_events)%ctype = PC_particle_went_out
+             call add_event(events, n_events, part, cIx, PC_particle_went_out)
              part%w                 = PC_dead_weight
              return
           end if
@@ -652,10 +649,7 @@ contains
           cType    = self%colls(cIx)%type
 
           if (self%coll_is_event(cIx)) then
-             n_events               = n_events + 1
-             events(n_events)%part  = part
-             events(n_events)%cix   = cIx
-             events(n_events)%ctype = cType
+             call add_event(events, n_events, part, cIx, cType)
           end if
 
           select case (cType)
@@ -696,15 +690,25 @@ contains
     if (associated(self%outside_check)) then
        cIx = self%outside_check(part)
        if (cIx > 0) then
-          n_events               = n_events + 1
-          events(n_events)%part  = part
-          events(n_events)%cix   = cIx
-          events(n_events)%ctype = PC_particle_went_out
-          part%w                 = PC_dead_weight
+          call add_event(events, n_events, part, cIx, PC_particle_went_out)
+          part%w = PC_dead_weight
        end if
     end if
 
   end subroutine move_and_collide
+
+  subroutine add_event(events, n_events, part, cIx, cType)
+    type(PC_event_t), intent(inout) :: events(:)
+    integer, intent(inout)          :: n_events
+    type(PC_part_t), intent(in)     :: part
+    integer, intent(in)             :: cIx
+    integer, intent(in)             :: cType
+
+    n_events               = n_events + 1
+    events(n_events)%part  = part
+    events(n_events)%cix   = cIx
+    events(n_events)%ctype = cType
+  end subroutine add_event
 
   !> Returns a sample from the exponential distribution of the collision times
   ! RNG_uniform() is uniform on [0,1), but log(0) = nan, so we take 1 - RNG_uniform()
