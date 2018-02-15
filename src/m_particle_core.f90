@@ -102,13 +102,19 @@ module m_particle_core
      !> Maximum time step for particle mover
      real(dp)                     :: dt_max = huge(1.0_dp)
 
+     !> Magnetic field (for Boris mover)
+     real(dp)                     :: B_vec(3) = [0.0_dp, 0.0_dp, 0.0_dp]
+
      !> If assigned call this method after moving particles to check whether
      !> they are outside the computational domain (then it should return a
      !> positive value)
      procedure(p_to_int_f), pointer, nopass :: outside_check  => null()
 
-     !> If assigned, use this method as the particle mover
-     procedure(subr_mover), pointer, nopass :: particle_mover => null()
+     !> The particle mover
+     procedure(subr_mover), pointer :: particle_mover => null()
+
+     !> Called after the particle mover
+     procedure(subr_after), pointer :: after_mover => null()
 
      !> The method to get particle accelerations
      procedure(p_to_r3_f), pointer, nopass :: accel_function => null()
@@ -197,11 +203,18 @@ module m_particle_core
        type(PC_part_t), intent(in) :: my_part
      end function bin_f
 
-     subroutine subr_mover(part, dt)
+     subroutine subr_mover(self, part, dt)
        import
+       class(PC_t), intent(in)        :: self
        type(PC_part_t), intent(inout) :: part
        real(dp), intent(in)           :: dt
      end subroutine subr_mover
+
+     subroutine subr_after(self, dt)
+       import
+       class(PC_t), intent(inout)     :: self
+       real(dp), intent(in)           :: dt
+     end subroutine subr_after
 
      subroutine sub_merge(part_a, part_b, part_out, rng)
        import
@@ -229,23 +242,24 @@ module m_particle_core
 
   public :: PC_verlet_advance
   public :: PC_verlet_correct_accel
+  public :: PC_boris_advance
+  public :: PC_after_dummy
 
 contains
 
   !> Initialization routine for the particle module
   subroutine initialize(self, mass, cross_secs, lookup_table_size, &
-       max_en_eV, n_part_max, rng_seed, particle_mover)
+       max_en_eV, n_part_max, rng_seed)
     use m_cross_sec
     use m_units_constants
-    class(PC_t), intent(inout)    :: self
-    type(CS_t), intent(in)        :: cross_secs(:)
-    integer, intent(in)           :: lookup_table_size
-    real(dp), intent(in)          :: mass, max_en_eV
-    integer, intent(in)           :: n_part_max
-    integer, intent(in), optional :: rng_seed(4)
-    procedure(subr_mover), optional :: particle_mover
-    integer, parameter            :: i8 = selected_int_kind(18)
-    integer(i8)                   :: rng_seed_8byte(2)
+    class(PC_t), intent(inout)      :: self
+    type(CS_t), intent(in)          :: cross_secs(:)
+    integer, intent(in)             :: lookup_table_size
+    real(dp), intent(in)            :: mass, max_en_eV
+    integer, intent(in)             :: n_part_max
+    integer, intent(in), optional   :: rng_seed(4)
+    integer, parameter              :: i8 = selected_int_kind(18)
+    integer(i8)                     :: rng_seed_8byte(2)
 
     if (size(cross_secs) < 1) then
        print *, "No cross sections given, will abort"
@@ -263,11 +277,9 @@ contains
        call self%rng%set_seed([8972134_i8, 21384823409_i8])
     end if
 
-    if (present(particle_mover)) then
-       self%particle_mover => particle_mover
-    else
-       self%particle_mover => PC_verlet_advance
-    end if
+    ! Set default particle mover
+    self%particle_mover => PC_verlet_advance
+    self%after_mover => PC_verlet_correct_accel
 
     call self%set_coll_rates(cross_secs, mass, max_en_eV, lookup_table_size)
   end subroutine initialize
@@ -323,24 +335,6 @@ contains
 
     call LT_to_file(self%rate_lt, lt_file)
   end subroutine to_file
-
-  subroutine get_colls_of_type(pc, ctype, ixs)
-    class(PC_t), intent(in) :: pc
-    integer, intent(in) :: ctype
-    integer, intent(inout), allocatable :: ixs(:)
-    integer :: nn, i
-
-    nn = count(pc%colls(:)%type == ctype)
-    allocate(ixs(nn))
-
-    nn = 0
-    do i = 1, pc%n_colls
-       if (pc%colls(i)%type == ctype) then
-          nn = nn + 1
-          ixs(nn) = i
-       end if
-    end do
-  end subroutine get_colls_of_type
 
   function get_mass(self) result(mass)
     class(PC_t), intent(in) :: self
@@ -837,7 +831,8 @@ contains
 
   !> Use a Verlet scheme to advance the particle position and velocity over time
   !> dt, and update t_left.
-  subroutine PC_verlet_advance(part, dt)
+  subroutine PC_verlet_advance(self, part, dt)
+    class(PC_t), intent(in)         :: self
     type(PC_part_t), intent(inout) :: part
     real(dp), intent(in)           :: dt
 
@@ -846,6 +841,50 @@ contains
     part%v      = part%v + part%a * dt
     part%t_left = part%t_left - dt
   end subroutine PC_verlet_advance
+
+  !> Advance the particle position and velocity over time dt taking into account
+  !> a constant magnetic field using Boris method.
+  subroutine PC_boris_advance(self, part, dt)
+    use m_units_constants
+    class(PC_t), intent(in)         :: self
+    type(PC_part_t), intent(inout) :: part
+    real(dp), intent(in)           :: dt
+    real(dp)                       :: t_vec(3), tmp(3)
+
+    ! Push the particle over dt/2
+    part%x = part%x + 0.5_dp * dt * part%v ! Use the previous velocity
+    part%v = part%v + 0.5_dp * dt * part%a
+
+    ! Rotate the velocity
+    tmp    = 0.5_dp * dt * self%B_vec * UC_elec_q_over_m
+    t_vec  = 2 * tmp / (1.d0 + (norm2(tmp))**2)
+    tmp    = part%v + cross_product(part%v, tmp)
+    tmp    = cross_product(tmp, t_vec)
+    part%v = part%v + tmp
+
+    ! Push the particle over dt/2
+    part%v = part%v + 0.5_dp * dt * part%a
+    part%x = part%x + 0.5_dp * dt * part%v ! Use the new velocity
+
+    ! Update time left
+    part%t_left = part%t_left - dt
+  end subroutine PC_boris_advance
+
+  subroutine PC_after_dummy(self, dt)
+    class(PC_t), intent(inout)     :: self
+    real(dp), intent(in)           :: dt
+  end subroutine PC_after_dummy
+
+  !> Return the cross product of vectors a and b
+  pure function cross_product(a, b) result(vec)
+    real(dp), intent(in) :: a(3)
+    real(dp), intent(in) :: b(3)
+    real(dp)             :: vec(3)
+
+    vec(1) = a(2) * b(3) - a(3) * b(2)
+    vec(2) = a(3) * b(1) - a(1) * b(3)
+    vec(3) = a(1) * b(2) - a(2) * b(1)
+  end function cross_product
 
   !> Perform the velocity correction of a Verlet scheme
   !!
@@ -856,8 +895,8 @@ contains
   !! to have a second order scheme, which is corrected here.
   subroutine PC_verlet_correct_accel(pc, dt)
     use m_units_constants
-    type(PC_t), intent(inout) :: pc
-    real(dp), intent(IN)      :: dt
+    class(PC_t), intent(inout) :: pc
+    real(dp), intent(in)      :: dt
     integer                   :: ll
     real(dp)                  :: new_accel(3)
 
