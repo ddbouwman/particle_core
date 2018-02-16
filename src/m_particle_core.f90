@@ -139,6 +139,7 @@ module m_particle_core
      procedure, non_overridable :: get_num_real_part
      procedure, non_overridable :: set_accel
      procedure, non_overridable :: get_max_coll_rate
+     procedure, non_overridable :: get_colls_of_type
      procedure, non_overridable :: loop_iopart
      procedure, non_overridable :: loop_ipart
      procedure, non_overridable :: compute_scalar_sum
@@ -335,6 +336,24 @@ contains
 
     call LT_to_file(self%rate_lt, lt_file)
   end subroutine to_file
+
+  subroutine get_colls_of_type(pc, ctype, ixs)
+    class(PC_t), intent(in) :: pc
+    integer, intent(in) :: ctype
+    integer, intent(inout), allocatable :: ixs(:)
+    integer :: nn, i
+
+    nn = count(pc%colls(:)%type == ctype)
+    allocate(ixs(nn))
+
+    nn = 0
+    do i = 1, pc%n_colls
+       if (pc%colls(i)%type == ctype) then
+          nn = nn + 1
+          ixs(nn) = i
+       end if
+    end do
+  end subroutine get_colls_of_type
 
   function get_mass(self) result(mass)
     class(PC_t), intent(in) :: self
@@ -846,7 +865,7 @@ contains
   !> a constant magnetic field using Boris method.
   subroutine PC_boris_advance(self, part, dt)
     use m_units_constants
-    class(PC_t), intent(in)         :: self
+    class(PC_t), intent(in)        :: self
     type(PC_part_t), intent(inout) :: part
     real(dp), intent(in)           :: dt
     real(dp)                       :: t_vec(3), tmp(3)
@@ -857,7 +876,7 @@ contains
 
     ! Rotate the velocity
     tmp    = 0.5_dp * dt * self%B_vec * UC_elec_q_over_m
-    t_vec  = 2 * tmp / (1.d0 + (norm2(tmp))**2)
+    t_vec  = 2 * tmp / (1.d0 + sum(tmp**2))
     tmp    = part%v + cross_product(part%v, tmp)
     tmp    = cross_product(tmp, t_vec)
     part%v = part%v + tmp
