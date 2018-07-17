@@ -1,11 +1,11 @@
 FC 	:= mpif90
 FFLAGS	:= -Wall -g -O2 -fopenmp $(USR_FLAGS)
-TESTS	:= test_m_particle_core test_m_cross_sec test_openmp test_swarm
+TESTS	:= test_m_cross_sec test_openmp test_swarm
 
 # Need these libraries for the tests
 LIBS	:= particle_core
-INCDIRS := ../src
-LIBDIRS := ../src
+INCDIRS := ..
+LIBDIRS := ..
 
 %.o: 	%.f90
 	$(FC) -c -o $@ $< $(FFLAGS) $(addprefix -I,$(INCDIRS))
@@ -24,4 +24,4 @@ clean:
 	$(RM) *.o *.mod $(TESTS)
 
 # Dependencies
-$(TESTS): ../src/libparticle_core.a
+$(TESTS): ../libparticle_core.a
