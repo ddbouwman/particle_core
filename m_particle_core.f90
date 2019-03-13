@@ -382,10 +382,8 @@ contains
     class(PC_t), intent(in)          :: self
     type(PC_events_t), intent(inout) :: events
 
-    if (any(self%coll_is_event(:))) then
-       if (.not. allocated(events%list)) then
-          allocate(events%list(PC_event_list_init_size))
-       end if
+    if (.not. allocated(events%list)) then
+       allocate(events%list(PC_event_list_init_size))
     end if
   end subroutine check_events_allocated
 
