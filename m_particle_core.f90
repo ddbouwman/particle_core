@@ -179,7 +179,7 @@ module m_particle_core
 
      function p_to_r3_f(my_part) result(my_vec)
        import
-       type(PC_part_t), intent(in) :: my_part
+       type(PC_part_t), intent(inout) :: my_part
        real(dp)                    :: my_vec(3)
      end function p_to_r3_f
 
@@ -195,7 +195,7 @@ module m_particle_core
 
      integer function p_to_int_f(my_part)
        import
-       type(PC_part_t), intent(in) :: my_part
+       type(PC_part_t), intent(inout) :: my_part
      end function p_to_int_f
 
      integer function bin_f(binner, my_part)
