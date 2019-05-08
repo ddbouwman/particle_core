@@ -525,7 +525,7 @@ contains
     end do
 
     ! Update self%rng (otherwise it would always stay the same)
-    call self%rng%set_seed([prng%rngs(1)%int_8(), prng%rngs(1)%int_8()])
+    call prng%update_seed(self%rng)
 
   end subroutine advance_openmp
 
