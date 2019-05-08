@@ -143,7 +143,6 @@ module m_particle_core
      procedure, non_overridable :: remove_particles
      procedure, non_overridable :: advance
      procedure, non_overridable :: advance_openmp
-     procedure, non_overridable :: handle_buffer
      procedure, non_overridable :: clean_up
      procedure, non_overridable :: create_part
      procedure, non_overridable :: add_part
@@ -459,7 +458,7 @@ contains
 
     do while (n <= self%n_part)
        call self%move_and_collide(n, self%rng, buffer)
-       call self%handle_buffer(buffer, events, 0)
+       call handle_buffer(self, buffer, events, 0)
        n = n + 1
     end do
   end subroutine advance_step
@@ -553,12 +552,12 @@ contains
        do n = n_lo, n_hi
           call self%move_and_collide(n, prng%rngs(tid), buffer)
           ! Make sure buffers are not getting too full
-          call self%handle_buffer(buffer, events, PC_advance_buf_size/2)
+          call handle_buffer(self, buffer, events, PC_advance_buf_size/2)
        end do
        !$omp end do
 
        ! Ensure buffers are empty at the end of the loop
-       call self%handle_buffer(buffer, events, 0)
+       call handle_buffer(self, buffer, events, 0)
 
        ! Ensure all particles have been added before the test below
        !$omp barrier
