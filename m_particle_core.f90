@@ -69,6 +69,22 @@ module m_particle_core
      type(PC_event_t), allocatable :: list(:)
   end type PC_events_t
 
+  !> Particle buffer for parallel simulations
+  type, public        :: PC_buf_t
+     !> Index for newly created particles
+     integer          :: i_part  = 0
+     !> Buffer for newly created particles
+     type(PC_part_t)  :: part(PC_advance_buf_size)
+     !> Index for removed particles
+     integer          :: i_rm    = 0
+     !> Buffer for removed particles
+     integer          :: rm(PC_advance_buf_size)
+     !> Index for events
+     integer          :: i_event = 0
+     !> Buffer for events
+     type(PC_event_t) :: event(PC_advance_buf_size)
+  end type PC_buf_t
+
   !> Particle core type, storing the particles and the collisions
   type, public                    :: PC_t
      !> Array storing the particles
@@ -127,14 +143,13 @@ module m_particle_core
      procedure, non_overridable :: remove_particles
      procedure, non_overridable :: advance
      procedure, non_overridable :: advance_openmp
+     procedure, non_overridable :: handle_buffer
      procedure, non_overridable :: clean_up
      procedure, non_overridable :: create_part
      procedure, non_overridable :: add_part
      procedure, non_overridable :: remove_part
      procedure, non_overridable :: periodify
      procedure, non_overridable :: translate
-     procedure, non_overridable :: get_mass
-     procedure, non_overridable :: get_part
      procedure, non_overridable :: get_num_sim_part
      procedure, non_overridable :: get_num_real_part
      procedure, non_overridable :: set_accel
@@ -355,12 +370,6 @@ contains
     end do
   end subroutine get_colls_of_type
 
-  function get_mass(self) result(mass)
-    class(PC_t), intent(in) :: self
-    real(dp) :: mass
-    mass = self%mass
-  end function get_mass
-
   subroutine remove_particles(self)
     class(PC_t), intent(inout) :: self
     self%n_part = 0
@@ -417,6 +426,7 @@ contains
     dt_step = dt / n_steps
   end subroutine limit_advance_dt
 
+  !> Advance particles over dt, using one or more step
   subroutine advance(self, dt, events)
     class(PC_t), intent(inout)       :: self
     real(dp), intent(in)             :: dt
@@ -427,6 +437,8 @@ contains
     call limit_advance_dt(self, dt, n_steps, dt_step)
     call check_events_allocated(self, events)
 
+    ! Advance the particles in one or more steps, which makes sure the buffers
+    ! for newly created particles and events are large enough
     do n = 1, n_steps
        call advance_step(self, dt_step, events)
     end do
@@ -434,42 +446,66 @@ contains
     call self%clean_up()
   end subroutine advance
 
+  !> Advance particles over dt in a single step
   subroutine advance_step(self, dt, events)
     class(PC_t), intent(inout)       :: self
     real(dp), intent(in)             :: dt
     type(PC_events_t), intent(inout) :: events
-    integer                          :: i, n, n_new, n_events
-    type(PC_part_t)                  :: p_buf(PC_advance_buf_size)
-    type(PC_event_t)                 :: e_buf(PC_advance_buf_size)
+    integer                          :: n
+    type(PC_buf_t)                   :: buffer
 
     self%particles(1:self%n_part)%t_left = dt
     n = 1
 
     do while (n <= self%n_part)
-       call self%move_and_collide(self%particles(n), &
-            self%rng, p_buf, n_new, e_buf, n_events)
-
-       if (self%particles(n)%w <= PC_dead_weight) then
-          call self%remove_part(n)
-       end if
-
-       if (n_new > 0) then
-          call self%check_space(self%n_part + n_new)
-          self%particles(self%n_part+1:self%n_part+n_new) = &
-               p_buf(1:n_new)
-          self%n_part = self%n_part + n_new
-       end if
-
-       if (n_events > 0) then
-          call ensure_events_storage(events, n_events)
-          i = events%n_stored
-          events%list(i+1:i+n_events) = e_buf(1:n_events)
-       end if
-
+       call self%move_and_collide(n, self%rng, buffer)
+       call self%handle_buffer(buffer, events, 0)
        n = n + 1
     end do
   end subroutine advance_step
 
+  subroutine handle_buffer(self, buffer, events, max_size)
+    class(PC_t), intent(inout)       :: self
+    type(PC_buf_t), intent(inout)    :: buffer
+    type(PC_events_t), intent(inout) :: events
+    !> Keep at most this many buffered items
+    integer, intent(in)              :: max_size
+    integer                          :: i
+
+    ! The buffer for new particles
+    if (buffer%i_part > max_size) then
+       !$omp critical
+       i = self%n_part
+       self%n_part = self%n_part + buffer%i_part
+       !$omp end critical
+       call self%check_space(i + buffer%i_part)
+       self%particles(i+1:i+buffer%i_part) = buffer%part(1:buffer%i_part)
+       buffer%i_part = 0
+    end if
+
+    ! The buffer for removed particles
+    if (buffer%i_rm > max_size) then
+       !$omp critical
+       do i = 1, buffer%i_rm
+          call self%remove_part(buffer%rm(i))
+       end do
+       !$omp end critical
+       buffer%i_rm = 0
+    end if
+
+    ! The buffer for events
+    if (buffer%i_event > max_size) then
+       !$omp critical
+       i = events%n_stored
+       call ensure_events_storage(events, buffer%i_event)
+       events%n_stored = events%n_stored + buffer%i_event
+       !$omp end critical
+       events%list(i+1:i+buffer%i_event) = buffer%event(1:buffer%i_event)
+       buffer%i_event = 0
+    end if
+  end subroutine handle_buffer
+
+  !> Advance the particles over dt in parallel, using one or more steps
   subroutine advance_openmp(self, dt, events)
     use omp_lib
     class(PC_t), intent(inout)       :: self
@@ -483,6 +519,8 @@ contains
     call limit_advance_dt(self, dt, n_steps, dt_step)
     call prng%init_parallel(omp_get_max_threads(), self%rng)
 
+    ! Advance the particles in one or more steps, which makes sure the buffers
+    ! for newly created particles and events are large enough
     do n = 1, n_steps
        call advance_openmp_step(self, dt_step, prng, events)
        call self%clean_up()
@@ -493,103 +531,34 @@ contains
 
   end subroutine advance_openmp
 
+  !> Advance the particles over dt in parallel, in a single step
   subroutine advance_openmp_step(self, dt, prng, events)
     use omp_lib
     class(PC_t), intent(inout)       :: self
     real(dp), intent(in)             :: dt
     type(prng_t), intent(inout)      :: prng
     type(PC_events_t), intent(inout) :: events
-    integer                          :: n, i_pbuf, i_rmbuf, n_new, tid, n_lo, n_hi
-    integer                          :: i, n_events, i_ebuf
-    type(PC_part_t)                  :: p_buf(PC_advance_buf_size)
-    integer                          :: rm_buf(PC_advance_buf_size)
-    type(PC_event_t)                 :: e_buf(PC_advance_buf_size)
+    type(PC_buf_t)                   :: buffer
+    integer                          :: n, tid, n_lo, n_hi
 
     self%particles(1:self%n_part)%t_left = dt
 
-    !$omp parallel private(n, tid, p_buf, i_pbuf, rm_buf, i_rmbuf, n_new, n_lo, n_hi) &
-    !$omp private(i, e_buf, i_ebuf, n_events)
+    !$omp parallel private(n, tid, n_lo, n_hi, buffer)
     tid     = omp_get_thread_num() + 1
-    i_pbuf  = 0
-    i_rmbuf = 0
-    i_ebuf  = 0
     n_lo    = 1
 
     do
        n_hi = self%n_part
        !$omp do
        do n = n_lo, n_hi
-          call self%move_and_collide(self%particles(n), prng%rngs(tid), &
-               p_buf(i_pbuf+1:), n_new, e_buf(i_ebuf+1:), n_events)
-          i_pbuf = i_pbuf + n_new
-          i_ebuf = i_ebuf + n_events
-
-          if (self%particles(n)%w <= PC_dead_weight) then
-             rm_buf(i_rmbuf+1) = n
-             i_rmbuf = i_rmbuf + 1
-          end if
-
-          ! Clean up buffers when they get full
-          if (i_pbuf > int(0.5_dp * PC_advance_buf_size)) then
-             !$omp critical
-             i = self%n_part
-             self%n_part = self%n_part + i_pbuf
-             !$omp end critical
-             call self%check_space(i + i_pbuf)
-             self%particles(i+1:i+i_pbuf) = p_buf(1:i_pbuf)
-             i_pbuf = 0
-          end if
-
-          if (i_rmbuf > int(0.5_dp * PC_advance_buf_size)) then
-             !$omp critical
-             do i = 1, i_rmbuf
-                call self%remove_part(rm_buf(i))
-             end do
-             !$omp end critical
-             i_rmbuf = 0
-          end if
-
-          if (i_ebuf > int(0.5_dp * PC_advance_buf_size)) then
-             !$omp critical
-             i = events%n_stored
-             call ensure_events_storage(events, i_ebuf)
-             events%n_stored = events%n_stored + i_ebuf
-             !$omp end critical
-             events%list(i+1:i+i_ebuf) = e_buf(1:i_ebuf)
-             i_ebuf = 0
-          end if
+          call self%move_and_collide(n, prng%rngs(tid), buffer)
+          ! Make sure buffers are not getting too full
+          call self%handle_buffer(buffer, events, PC_advance_buf_size/2)
        end do
        !$omp end do
 
        ! Ensure buffers are empty at the end of the loop
-       if (i_pbuf > 0) then
-          !$omp critical
-          i = self%n_part
-          self%n_part = self%n_part + i_pbuf
-          !$omp end critical
-          call self%check_space(i + i_pbuf)
-          self%particles(i+1:i+i_pbuf) = p_buf(1:i_pbuf)
-          i_pbuf = 0
-       end if
-
-       if (i_rmbuf > 0) then
-          !$omp critical
-          do i = 1, i_rmbuf
-             call self%remove_part(rm_buf(i))
-          end do
-          !$omp end critical
-          i_rmbuf = 0
-       end if
-
-       if (i_ebuf > 0) then
-          !$omp critical
-          i = events%n_stored
-          call ensure_events_storage(events, i_ebuf)
-          events%n_stored = events%n_stored + i_ebuf
-          !$omp end critical
-          events%list(i+1:i+i_ebuf) = e_buf(1:i_ebuf)
-          i_ebuf = 0
-       end if
+       call self%handle_buffer(buffer, events, 0)
 
        ! Ensure all particles have been added before the test below
        !$omp barrier
@@ -606,119 +575,120 @@ contains
   end subroutine advance_openmp_step
 
   !> Advance particles and collide them with neutrals.
-  !>
-  !> @todo technically, intent(in) for self and intent(inout) for part is
-  !> illegal (unless we make a copy of a particle)
-  subroutine move_and_collide(self, part, rng, new_part, n_new, events, n_events)
+  subroutine move_and_collide(self, ix, rng, buffer)
     use m_cross_sec
-    class(PC_t), intent(in)         :: self
-    type(RNG_t), intent(inout)      :: rng
-    type(PC_part_t), intent(inout)  :: part
-    type(PC_part_t), intent(inout)  :: new_part(:)
-    integer, intent(out)            :: n_new
-    type(PC_event_t), intent(inout) :: events(:)
-    integer, intent(out)            :: n_events
+    class(PC_t), intent(inout)    :: self
+    integer, intent(in)           :: ix !< Index of particle
+    type(RNG_t), intent(inout)    :: rng
+    type(PC_buf_t), intent(inout) :: buffer
 
-    integer            :: cIx, cType, n_coll_out
+    integer            :: i, cIx, cType, n_coll_out
     real(dp)           :: coll_time, new_vel
     type(PC_part_t)    :: coll_out(PC_coll_max_part_out)
 
-    n_new    = 0
-    n_events = 0
+    associate(part => self%particles(ix))
+      do
+         ! Get the next collision time
+         coll_time = sample_coll_time(rng%unif_01(), self%inv_max_rate)
 
-    do
-       ! Get the next collision time
-       coll_time = sample_coll_time(rng%unif_01(), self%inv_max_rate)
+         ! If larger than t_left, advance the particle without a collision
+         if (coll_time > part%t_left) exit
 
-       ! If larger than t_left, advance the particle without a collision
-       if (coll_time > part%t_left) exit
+         ! Ensure we don't move the particle over more than dt_max
+         do while (coll_time > self%dt_max)
+            call self%particle_mover(part, self%dt_max)
+            coll_time = coll_time - self%dt_max
+         end do
 
-       ! Ensure we don't move the particle over more than dt_max
-       do while (coll_time > self%dt_max)
-          call self%particle_mover(part, self%dt_max)
-          coll_time = coll_time - self%dt_max
-       end do
+         ! Move particle to collision time
+         call self%particle_mover(part, coll_time)
+         call handle_particles_outside(self, part, ix, buffer)
+         if (part%w <= PC_dead_weight) return
 
-       ! Move particle to collision time
-       call self%particle_mover(part, coll_time)
+         new_vel = norm2(part%v)
+         cIx     = get_coll_index(self%rate_lt, self%n_colls, self%max_rate, &
+              new_vel, rng%unif_01())
 
-       if (associated(self%outside_check)) then
-          cIx = self%outside_check(part)
-          if (cIx > 0) then
-             call add_event(events, n_events, part, cIx, PC_particle_went_out)
-             part%w = PC_dead_weight
-             return
-          end if
-       end if
+         if (cIx > 0) then
+            ! Perform the corresponding collision
+            cType    = self%colls(cIx)%type
 
-       new_vel = norm2(part%v)
-       cIx     = get_coll_index(self%rate_lt, self%n_colls, self%max_rate, &
-            new_vel, rng%unif_01())
+            if (self%coll_is_event(cIx)) then
+               call add_event(buffer, part, cIx, cType)
+            end if
 
-       if (cIx > 0) then
-          ! Perform the corresponding collision
-          cType    = self%colls(cIx)%type
+            select case (cType)
+            case (CS_attach_t)
+               call attach_collision(part, coll_out, &
+                    n_coll_out, self%colls(cIx), rng)
+            case (CS_elastic_t)
+               call elastic_collision(part, coll_out, &
+                    n_coll_out, self%colls(cIx), rng)
+            case (CS_excite_t)
+               call excite_collision(part, coll_out, &
+                    n_coll_out, self%colls(cIx), rng)
+            case (CS_ionize_t)
+               call ionization_collision(part, coll_out, &
+                    n_coll_out, self%colls(cIx), rng)
+            case default
+               error stop "Wrong collision type"
+            end select
 
-          if (self%coll_is_event(cIx)) then
-             call add_event(events, n_events, part, cIx, cType)
-          end if
+            ! Store the particles returned
+            if (n_coll_out == 0) then
+               part%w = PC_dead_weight
+               buffer%i_rm = buffer%i_rm + 1
+               buffer%rm(buffer%i_rm) = ix
+               return
+            else if (n_coll_out == 1) then
+               part = coll_out(1)
+            else
+               part = coll_out(1)
+               i = buffer%i_part
+               buffer%part(i+1:i+n_coll_out-1) = &
+                    coll_out(2:n_coll_out)
+               buffer%i_part = i+n_coll_out-1
+            end if
+         end if
+      end do
 
-          select case (cType)
-          case (CS_attach_t)
-             call attach_collision(part, coll_out, &
-                  n_coll_out, self%colls(cIx), rng)
-          case (CS_elastic_t)
-             call elastic_collision(part, coll_out, &
-                  n_coll_out, self%colls(cIx), rng)
-          case (CS_excite_t)
-             call excite_collision(part, coll_out, &
-                  n_coll_out, self%colls(cIx), rng)
-          case (CS_ionize_t)
-             call ionization_collision(part, coll_out, &
-                  n_coll_out, self%colls(cIx), rng)
-          case default
-             error stop "Wrong collision type"
-          end select
+      ! Move particle to end of the time step
+      call self%particle_mover(part, part%t_left)
+      call handle_particles_outside(self, part, ix, buffer)
+    end associate
 
-          ! Store the particles returned
-          if (n_coll_out == 0) then
-             part%w = PC_dead_weight
-             return
-          else if (n_coll_out == 1) then
-             part = coll_out(1)
-          else
-             part = coll_out(1)
-             new_part(n_new+1:n_new+n_coll_out-1) = &
-                  coll_out(2:n_coll_out)
-             n_new = n_new + n_coll_out - 1
-          end if
-       end if
-    end do
+  end subroutine move_and_collide
 
-    ! Move particle to end of the time step
-    call self%particle_mover(part, part%t_left)
+  subroutine handle_particles_outside(self, part, ix, buffer)
+    class(PC_t), intent(inout)     :: self
+    type(PC_part_t), intent(inout) :: part
+    integer, intent(in)            :: ix !< Particle index
+    type(PC_buf_t), intent(inout)  :: buffer
+    integer                        :: cIx
 
     if (associated(self%outside_check)) then
        cIx = self%outside_check(part)
        if (cIx > 0) then
-          call add_event(events, n_events, part, cIx, PC_particle_went_out)
+          call add_event(buffer, part, cIx, PC_particle_went_out)
+          buffer%i_rm = buffer%i_rm + 1
+          buffer%rm(buffer%i_rm) = ix
           part%w = PC_dead_weight
+          return
        end if
     end if
+  end subroutine handle_particles_outside
 
-  end subroutine move_and_collide
+  !> Create event for a collision
+  subroutine add_event(buffer, part, cIx, cType)
+    type(PC_buf_t), intent(inout) :: buffer !< Buffer for events
+    type(PC_part_t), intent(in)   :: part   !< Particle creating the event
+    integer, intent(in)           :: cIx    !< Index of collision
+    integer, intent(in)           :: cType  !< Collision type
 
-  subroutine add_event(events, n_events, part, cIx, cType)
-    type(PC_event_t), intent(inout) :: events(:)
-    integer, intent(inout)          :: n_events
-    type(PC_part_t), intent(in)     :: part
-    integer, intent(in)             :: cIx
-    integer, intent(in)             :: cType
-
-    n_events               = n_events + 1
-    events(n_events)%part  = part
-    events(n_events)%cix   = cIx
-    events(n_events)%ctype = cType
+    buffer%i_event = buffer%i_event + 1
+    buffer%event(buffer%i_event)%part  = part
+    buffer%event(buffer%i_event)%cix   = cIx
+    buffer%event(buffer%i_event)%ctype = cType
   end subroutine add_event
 
   !> Returns a sample from the exponential distribution of the collision times
@@ -1023,18 +993,6 @@ contains
        self%particles(ll)%x = self%particles(ll)%x + delta_x
     end do
   end subroutine translate
-
-  real(dp) function get_part_mass(self)
-    class(PC_t), intent(inout) :: self
-    get_part_mass = self%mass
-  end function get_part_mass
-
-  function get_part(self, ll) result(part)
-    class(PC_t), intent(inout) :: self
-    integer, intent(in) :: ll
-    type(PC_part_t) :: part
-    part = self%particles(ll)
-  end function get_part
 
   !> Return the number of real particles
   real(dp) function get_num_real_part(self)
