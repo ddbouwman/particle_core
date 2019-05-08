@@ -252,8 +252,6 @@ module m_particle_core
   public :: PC_merge_part_rxv
   public :: PC_split_part
   public :: PC_v_to_en
-  public :: PC_share
-  public :: PC_reorder_by_bins
 
   public :: PC_verlet_advance
   public :: PC_verlet_correct_accel
@@ -463,6 +461,7 @@ contains
     end do
   end subroutine advance_step
 
+  !> If the buffers for a thread are getting too full, empty them
   subroutine handle_buffer(self, buffer, events, max_size)
     class(PC_t), intent(inout)       :: self
     type(PC_buf_t), intent(inout)    :: buffer
@@ -658,6 +657,7 @@ contains
 
   end subroutine move_and_collide
 
+  !> Check if particles went out of the domain, and remove them if so
   subroutine handle_particles_outside(self, part, ix, buffer)
     class(PC_t), intent(inout)     :: self
     type(PC_part_t), intent(inout) :: part
@@ -672,7 +672,6 @@ contains
           buffer%i_rm = buffer%i_rm + 1
           buffer%rm(buffer%i_rm) = ix
           part%w = PC_dead_weight
-          return
        end if
     end if
   end subroutine handle_particles_outside
@@ -909,6 +908,7 @@ contains
     !$omp end parallel do
   end subroutine set_accel
 
+  !> Remove dead particles from the list
   subroutine clean_up(self)
     class(PC_t), intent(inout) :: self
     integer :: ix_end, ix_clean, n_part
@@ -934,6 +934,7 @@ contains
     end do
   end subroutine clean_up
 
+  !> Add a particle
   subroutine add_part(self, part)
     class(PC_t), intent(inout)  :: self
     type(PC_part_t), intent(in) :: part
@@ -943,6 +944,7 @@ contains
     self%particles(self%n_part) = part
   end subroutine add_part
 
+  !> Create a particles
   subroutine create_part(self, x, v, a, weight, t_left, id, ptype)
     class(PC_t), intent(inout) :: self
     real(dp), intent(IN)       :: x(3), v(3), a(3), weight, t_left
@@ -969,6 +971,7 @@ contains
     self%particles(ix_to_remove)%w = PC_dead_weight
   end subroutine remove_part
 
+  !> Map particle coordinates to a periodic domain
   subroutine periodify(self, is_periodic, lengths)
     class(PC_t), intent(inout) :: self
     logical, intent(in) :: is_periodic(3)
@@ -984,6 +987,7 @@ contains
     end do
   end subroutine periodify
 
+  !> Translate all particle coordinates
   subroutine translate(self, delta_x)
     class(PC_t), intent(inout) :: self
     real(dp), intent(in) :: delta_x(3)
@@ -1082,21 +1086,25 @@ contains
     end do
   end subroutine compute_scalar_sum
 
+  !> Get energy from velocity vector
   pure real(dp) function PC_v_to_en(v, mass)
     real(dp), intent(in) :: v(3), mass
     PC_v_to_en = 0.5_dp * mass * sum(v**2)
   end function PC_v_to_en
 
+  !> Get energy from velocity (scalar)
   real(dp) elemental function PC_speed_to_en(vel, mass)
     real(dp), intent(in) :: vel, mass
     PC_speed_to_en = 0.5_dp * mass * vel**2
   end function PC_speed_to_en
 
+  !> Get speed (scalar) from energy
   real(dp) elemental function PC_en_to_vel(en, mass)
     real(dp), intent(in) :: en, mass
     PC_en_to_vel = sqrt(2 * en / mass)
   end function PC_en_to_vel
 
+  !> Check whether enough space is available
   subroutine check_space(self, n_req)
     class(PC_t), intent(in) :: self
     integer, intent(in) :: n_req
@@ -1161,6 +1169,7 @@ contains
     self%inv_max_rate = 1 / self%max_rate
   end subroutine set_coll_rates
 
+  !> Sort the particles according to sort_func
   subroutine sort(self, sort_func)
     use m_mrgrnk
     class(PC_t), intent(inout)   :: self
@@ -1633,114 +1642,5 @@ contains
        end select
     end do
   end subroutine get_coeffs
-
-  ! Share particles between PC_t objects
-  subroutine PC_share(pcs)
-    type(PC_t), intent(inout) :: pcs(:)
-
-    integer :: i_temp(1), n_pc
-    integer :: n_avg, i_min, i_max, n_min, n_max, n_send
-
-    n_pc = size(pcs)
-    n_avg = ceiling(sum(pcs(:)%n_part) / real(n_pc, dp))
-
-    do
-       i_temp = maxloc(pcs(:)%n_part)
-       i_max  = i_temp(1)
-       n_max  = pcs(i_max)%n_part
-       i_temp = minloc(pcs(:)%n_part)
-       i_min  = i_temp(1)
-       n_min  = pcs(i_min)%n_part
-
-       ! Difference it at most n_pc - 1, if all lists get one more particle
-       ! than the last list
-       if (n_max - n_min < n_pc) exit
-
-       ! Send particles from i_max to i_min
-       n_send = min(n_max - n_avg, n_avg - n_min)
-       call pcs(i_min)%check_space(n_min+n_send)
-
-       pcs(i_min)%particles(n_min+1:n_min+n_send) = &
-            pcs(i_max)%particles(n_max-n_send+1:n_max)
-
-       ! Always at the end of a list, so do not need to clean up later
-       pcs(i_min)%n_part = pcs(i_min)%n_part + n_send
-       pcs(i_max)%n_part = pcs(i_max)%n_part - n_send
-    end do
-  end subroutine PC_share
-
-  subroutine PC_reorder_by_bins(pcs, binner)
-    use m_mrgrnk
-    type(PC_t), intent(inout) :: pcs(:)
-    class(PC_bin_t), intent(in) :: binner
-    integer, allocatable :: bin_counts(:,:)
-    integer, allocatable :: bin_counts_sum(:)
-    integer, allocatable :: bin_owner(:)
-    integer :: prev_num_part(size(pcs))
-    integer :: n_pc, n_avg, total, remaining, tmp_sum
-    integer :: ll, io, ib, ip, new_loc
-
-    type tmp_t
-       integer, allocatable :: ib(:)
-    end type tmp_t
-    type(tmp_t), allocatable :: pcs_bins(:)
-
-    n_pc = size(pcs)
-    total = sum(pcs(:)%n_part)
-    n_avg = ceiling(total / real(n_pc, dp))
-
-    allocate(bin_counts(binner%n_bins, n_pc))
-    allocate(bin_counts_sum(binner%n_bins))
-    allocate(bin_owner(binner%n_bins))
-    allocate(pcs_bins(n_pc))
-    bin_counts(:, :) = 0
-
-    ! Get the counts in the bins for each pcs(ip)
-    do ip = 1, n_pc
-       allocate(pcs_bins(ip)%ib(pcs(ip)%n_part))
-       do ll = 1, pcs(ip)%n_part
-          ib                  = binner%bin_func(pcs(ip)%particles(ll))
-          pcs_bins(ip)%ib(ll) = ib
-          bin_counts(ib, ip)  = bin_counts(ib, ip) + 1
-       end do
-    end do
-
-    bin_counts_sum = sum(bin_counts, dim=2)
-    tmp_sum        = 0
-    ip             = 1
-    remaining      = total
-
-    ! Set the owners of the bins
-    do ib = 1, binner%n_bins
-       tmp_sum = tmp_sum + bin_counts_sum(ib)
-       bin_owner(ib) = ip
-       if (tmp_sum >= remaining / real(n_pc-ip+1, dp)) then
-          ip = ip + 1
-          remaining = remaining - tmp_sum
-          tmp_sum = 0
-       end if
-    end do
-
-    prev_num_part(:) = pcs(:)%n_part
-
-    do ip = 1, n_pc
-       do ll = 1, prev_num_part(ip)
-          ib = pcs_bins(ip)%ib(ll)
-          io = bin_owner(ib)
-          if (io /= ip) then
-             ! Insert at owner
-             new_loc = pcs(io)%n_part + 1
-             call pcs(io)%check_space(new_loc)
-             pcs(io)%particles(new_loc) = pcs(ip)%particles(ll)
-             pcs(io)%n_part = new_loc
-             call remove_part(pcs(ip), ll)
-          end if
-       end do
-    end do
-
-    do ip = 1, n_pc
-       call pcs(ip)%clean_up()
-    end do
-  end subroutine PC_reorder_by_bins
 
 end module m_particle_core
