@@ -43,18 +43,18 @@ module m_cross_sec
      character(LEN=line_len) :: comment       ! Additional comments
   end type CS_t
 
-  integer, parameter :: CS_attach_t = 1, &
-       CS_elastic_t = 2, &
-       CS_excite_t = 3, &
-       CS_ionize_t = 4, &
-       CS_num_types = 4
+  integer, parameter, public :: CS_attach_t  = 1
+  integer, parameter, public :: CS_elastic_t = 2
+  integer, parameter, public :: CS_excite_t  = 3
+  integer, parameter, public :: CS_ionize_t  = 4
+  integer, parameter, public :: CS_num_types = 4
+
   integer, parameter :: max_num_cols_per_gas = 50
-  integer, parameter :: max_num_rows = 400
+  integer, parameter :: max_num_rows         = 400
 
   ! Public variables
   public :: CS_t
   public :: CS_coll_t
-  public :: CS_attach_t, CS_elastic_t, CS_excite_t, CS_ionize_t
 
   ! Methods
   public :: CS_add_from_file

@@ -85,6 +85,12 @@ module m_particle_core
      type(PC_event_t) :: event(PC_advance_buf_size)
   end type PC_buf_t
 
+  !> Type for directly specifying collision rates
+  type, public :: rate_func_t
+     type(CS_coll_t)                       :: coll
+     procedure(rate_func), pointer, nopass :: ptr => null()
+  end type rate_func_t
+
   !> Particle core type, storing the particles and the collisions
   type, public                    :: PC_t
      !> Array storing the particles
@@ -135,6 +141,9 @@ module m_particle_core
      !> The method to get particle accelerations
      procedure(p_to_r3_f), pointer, nopass :: accel_function => null()
 
+     !> To set the velocity of tracer particles
+     procedure(p_to_r3_f), pointer, nopass :: tracer_velocity => null()
+
    contains
 
      ! A list of methods
@@ -159,7 +168,8 @@ module m_particle_core
      procedure, non_overridable :: compute_scalar_sum
      procedure, non_overridable :: compute_vector_sum
      procedure, non_overridable :: move_and_collide
-     procedure, non_overridable :: set_cross_secs
+     procedure, non_overridable :: use_cross_secs
+     procedure, non_overridable :: use_rate_funcs
      procedure, non_overridable :: get_mean_energy
      procedure, non_overridable :: get_coll_rates
      procedure, non_overridable :: check_space
@@ -246,16 +256,24 @@ module m_particle_core
        integer, intent(inout)         :: n_part_out
        type(RNG_t), intent(inout)     :: rng
      end subroutine sub_split
+
+     function rate_func(v) result(rate)
+       import
+       real(dp), intent(in) :: v
+       real(dp)             :: rate
+     end function rate_func
   end interface
 
   ! Public procedures
   public :: PC_merge_part_rxv
   public :: PC_split_part
   public :: PC_v_to_en
+  public :: PC_speed_to_en
 
   public :: PC_verlet_advance
   public :: PC_verlet_correct_accel
   public :: PC_boris_advance
+  public :: PC_tracer_advance_midpoint
   public :: PC_after_dummy
 
 contains
@@ -282,9 +300,20 @@ contains
     end if
 
     ! Set default particle mover
-    self%particle_mover => PC_verlet_advance
-    self%after_mover => PC_verlet_correct_accel
+    if (.not. associated(self%particle_mover)) &
+         self%particle_mover => PC_verlet_advance
+
   end subroutine initialize
+
+  subroutine check_methods(self)
+    class(PC_t), intent(inout) :: self
+
+    if (associated(self%particle_mover, PC_tracer_advance_midpoint)) then
+       if (.not. associated(self%tracer_velocity)) &
+            error stop "Set the tracer_velocity method for tracers"
+    end if
+
+  end subroutine check_methods
 
   !> Initialization routine for the particle module
   subroutine init_from_file(self, param_file, lt_file, rng_seed)
@@ -420,6 +449,7 @@ contains
     integer                          :: n, n_steps
     real(dp)                         :: dt_step
 
+    call check_methods(self)
     call limit_advance_dt(self, dt, n_steps, dt_step)
     call check_events_allocated(self, events)
 
@@ -502,6 +532,7 @@ contains
     real(dp)                         :: dt_step
     type(prng_t)                     :: prng
 
+    call check_methods(self)
     call check_events_allocated(self, events)
     call limit_advance_dt(self, dt, n_steps, dt_step)
     call prng%init_parallel(omp_get_max_threads(), self%rng)
@@ -606,8 +637,7 @@ contains
 
             select case (cType)
             case (CS_attach_t)
-               call attach_collision(part, coll_out, &
-                    n_coll_out, self%colls(cIx), rng)
+               n_coll_out = 0
             case (CS_elastic_t)
                call elastic_collision(part, coll_out, &
                     n_coll_out, self%colls(cIx), rng)
@@ -771,17 +801,6 @@ contains
     call scatter_isotropic(part_out(2), velocity, rng)
   end subroutine ionization_collision
 
-  !> Perform attachment of electron 'll'
-  subroutine attach_collision(part_in, part_out, n_part_out, coll, rng)
-    use m_units_constants
-    type(PC_part_t), intent(in)    :: part_in
-    type(PC_part_t), intent(inout) :: part_out(:)
-    integer, intent(out)           :: n_part_out
-    type(CS_coll_t), intent(in)    :: coll
-    type(RNG_t), intent(inout)     :: rng
-    n_part_out = 0
-  end subroutine attach_collision
-
   subroutine scatter_isotropic(part, vel_norm, rng)
     type(PC_part_t), intent(inout) :: part
     real(dp), intent(in)           :: vel_norm
@@ -842,6 +861,21 @@ contains
     ! Update time left
     part%t_left = part%t_left - dt
   end subroutine PC_boris_advance
+
+  !> Use a midpoint scheme to advance a particle tracing a velocity field
+  subroutine PC_tracer_advance_midpoint(self, part, dt)
+    class(PC_t), intent(in)        :: self
+    type(PC_part_t), intent(inout) :: part
+    real(dp), intent(in)           :: dt
+    real(dp)                       :: x(3)
+
+    x           = part%x
+    part%x      = part%x + 0.5_dp * part%v * dt
+    part%v      = self%tracer_velocity(part)
+    part%x      = x + part%v * dt
+    part%v      = self%tracer_velocity(part)
+    part%t_left = part%t_left - dt
+  end subroutine PC_tracer_advance_midpoint
 
   subroutine PC_after_dummy(self, dt)
     class(PC_t), intent(inout)     :: self
@@ -1107,7 +1141,7 @@ contains
   end subroutine check_space
 
   !> Create a lookup table with cross collision rates from cross sections
-  subroutine set_cross_secs(self, max_ev, table_size, cross_secs)
+  subroutine use_cross_secs(self, max_ev, table_size, cross_secs)
     use m_units_constants
     use m_cross_sec
     use m_lookup_table
@@ -1156,7 +1190,56 @@ contains
 
     self%max_rate = maxval(sum_rate_list)
     self%inv_max_rate = 1 / self%max_rate
-  end subroutine set_cross_secs
+  end subroutine use_cross_secs
+
+  !> Create a lookup table with cross collision rates from a list of functions
+  subroutine use_rate_funcs(self, max_ev, table_size, rate_funcs)
+    use m_units_constants
+    use m_cross_sec
+    use m_lookup_table
+    class(PC_t), intent(inout)    :: self
+    real(dp), intent(in)          :: max_ev
+    integer, intent(in)           :: table_size
+    type(rate_func_t), intent(in) :: rate_funcs(:)
+
+    real(dp)                  :: vel_list(table_size), rate_list(table_size)
+    real(dp)                  :: sum_rate_list(table_size)
+    integer                   :: ix, i_c, i_row, n_colls
+    real(dp)                  :: max_vel
+
+    max_vel      = PC_en_to_vel(max_ev * UC_elec_volt, self%mass)
+    n_colls      = size(rate_funcs)
+    self%n_colls = n_colls
+    allocate(self%colls(n_colls))
+    allocate(self%coll_is_event(n_colls))
+    self%coll_is_event(:) = .false.
+
+    ! Set a range of velocities
+    do ix = 1, table_size
+       vel_list(ix) = (ix-1) * max_vel / (table_size-1)
+       sum_rate_list(ix) = 0
+    end do
+
+    ! Create collision rate table
+    self%rate_lt = LT_create(0.0_dp, max_vel, table_size, n_colls)
+
+    do i_c = 1, n_colls
+       self%colls(i_c) = rate_funcs(i_c)%coll
+
+       ! Linear interpolate cross sections by energy
+       do i_row = 1, table_size
+          rate_list(i_row) = rate_funcs(i_c)%ptr(vel_list(i_row))
+       end do
+
+       ! We store the sum of the collision rates with index up to i_c, this
+       ! makes the null-collision method straightforward.
+       sum_rate_list = sum_rate_list + rate_list
+       call LT_set_col(self%rate_lt, i_c, vel_list, sum_rate_list)
+    end do
+
+    self%max_rate = maxval(sum_rate_list)
+    self%inv_max_rate = 1 / self%max_rate
+  end subroutine use_rate_funcs
 
   !> Sort the particles according to sort_func
   subroutine sort(self, sort_func)
