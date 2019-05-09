@@ -480,6 +480,13 @@ contains
     end do
   end subroutine advance_step
 
+  subroutine init_buffer(buffer)
+    type(PC_buf_t), intent(inout) :: buffer
+    buffer%i_part  = 0
+    buffer%i_rm    = 0
+    buffer%i_event = 0
+  end subroutine init_buffer
+
   !> If the buffers for a thread are getting too full, empty them
   subroutine handle_buffer(self, buffer, events, max_size)
     class(PC_t), intent(inout)       :: self
@@ -562,6 +569,7 @@ contains
     self%particles(1:self%n_part)%t_left = dt
 
     !$omp parallel private(n, tid, n_lo, n_hi, buffer)
+    call init_buffer(buffer)    ! Make sure private copies are initialized
     tid     = omp_get_thread_num() + 1
     n_lo    = 1
 
