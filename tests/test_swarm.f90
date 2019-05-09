@@ -39,8 +39,8 @@ program test_m_particle_core
 
   print *, "Initializing particle module"
   rng_seed = get_random_seed()
-  call pc%initialize(part_mass, cross_secs, lkp_tbl_size, &
-       max_en_eV, max_num_part, rng_seed=rng_seed)
+  call pc%initialize(part_mass, max_num_part, rng_seed=rng_seed)
+  call pc%set_cross_secs(max_en_eV, lkp_tbl_size, cross_secs)
 
   where (pc%colls(:)%type == CS_ionize_t)
      pc%coll_is_event(:) = .true.

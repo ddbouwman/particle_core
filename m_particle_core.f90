@@ -159,7 +159,7 @@ module m_particle_core
      procedure, non_overridable :: compute_scalar_sum
      procedure, non_overridable :: compute_vector_sum
      procedure, non_overridable :: move_and_collide
-     procedure, non_overridable :: set_coll_rates
+     procedure, non_overridable :: set_cross_secs
      procedure, non_overridable :: get_mean_energy
      procedure, non_overridable :: get_coll_rates
      procedure, non_overridable :: check_space
@@ -261,23 +261,14 @@ module m_particle_core
 contains
 
   !> Initialization routine for the particle module
-  subroutine initialize(self, mass, cross_secs, lookup_table_size, &
-       max_en_eV, n_part_max, rng_seed)
-    use m_cross_sec
+  subroutine initialize(self, mass, n_part_max, rng_seed)
     use m_units_constants
     class(PC_t), intent(inout)      :: self
-    type(CS_t), intent(in)          :: cross_secs(:)
-    integer, intent(in)             :: lookup_table_size
-    real(dp), intent(in)            :: mass, max_en_eV
+    real(dp), intent(in)            :: mass
     integer, intent(in)             :: n_part_max
     integer, intent(in), optional   :: rng_seed(4)
     integer, parameter              :: i8 = selected_int_kind(18)
     integer(i8)                     :: rng_seed_8byte(2)
-
-    if (size(cross_secs) < 1) then
-       print *, "No cross sections given, will abort"
-       stop
-    end if
 
     allocate(self%particles(n_part_max))
     self%mass   = mass
@@ -293,8 +284,6 @@ contains
     ! Set default particle mover
     self%particle_mover => PC_verlet_advance
     self%after_mover => PC_verlet_correct_accel
-
-    call self%set_coll_rates(cross_secs, mass, max_en_eV, lookup_table_size)
   end subroutine initialize
 
   !> Initialization routine for the particle module
@@ -1117,22 +1106,22 @@ contains
     end if
   end subroutine check_space
 
-  !> Create a lookup table with cross sections for a number of energies
-  subroutine set_coll_rates(self, cross_secs, mass, max_ev, table_size)
+  !> Create a lookup table with cross collision rates from cross sections
+  subroutine set_cross_secs(self, max_ev, table_size, cross_secs)
     use m_units_constants
     use m_cross_sec
     use m_lookup_table
     class(PC_t), intent(inout) :: self
-    type(CS_t), intent(in)     :: cross_secs(:)
+    real(dp), intent(in)       :: max_ev
     integer, intent(in)        :: table_size
-    real(dp), intent(in)       :: mass, max_ev
+    type(CS_t), intent(in)     :: cross_secs(:)
 
     real(dp)                  :: vel_list(table_size), rate_list(table_size)
     real(dp)                  :: sum_rate_list(table_size)
     integer                   :: ix, i_c, i_row, n_colls
     real(dp)                  :: max_vel, en_eV
 
-    max_vel      = PC_en_to_vel(max_ev * UC_elec_volt, mass)
+    max_vel      = PC_en_to_vel(max_ev * UC_elec_volt, self%mass)
     n_colls      = size(cross_secs)
     self%n_colls = n_colls
     allocate(self%colls(n_colls))
@@ -1153,7 +1142,7 @@ contains
 
        ! Linear interpolate cross sections by energy
        do i_row = 1, table_size
-          en_eV = PC_speed_to_en(vel_list(i_row), mass) / UC_elec_volt
+          en_eV = PC_speed_to_en(vel_list(i_row), self%mass) / UC_elec_volt
           call LT_lin_interp_list(cross_secs(i_c)%en_cs(1, :), &
                cross_secs(i_c)%en_cs(2, :), en_eV, rate_list(i_row))
           rate_list(i_row) = rate_list(i_row) * vel_list(i_row)
@@ -1167,7 +1156,7 @@ contains
 
     self%max_rate = maxval(sum_rate_list)
     self%inv_max_rate = 1 / self%max_rate
-  end subroutine set_coll_rates
+  end subroutine set_cross_secs
 
   !> Sort the particles according to sort_func
   subroutine sort(self, sort_func)

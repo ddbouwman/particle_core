@@ -45,8 +45,8 @@ program test_m_particle_core
 
   print *, "Initializing particle module"
   print *, part_mass
-  call pc%initialize(part_mass, cross_secs, lkp_tbl_size, &
-       max_en_eV, max_num_part)
+  call pc%initialize(part_mass, max_num_part)
+  call pc%set_cross_secs(max_en_eV, lkp_tbl_size, cross_secs)
 
   num_colls = pc%get_num_colls()
   deallocate(cross_secs)
