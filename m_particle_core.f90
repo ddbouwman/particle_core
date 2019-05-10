@@ -303,6 +303,9 @@ contains
     if (.not. associated(self%particle_mover)) &
          self%particle_mover => PC_verlet_advance
 
+    if (.not. associated(self%after_mover)) &
+         self%after_mover => PC_after_dummy
+
   end subroutine initialize
 
   subroutine check_methods(self)
@@ -888,6 +891,8 @@ contains
   subroutine PC_after_dummy(self, dt)
     class(PC_t), intent(inout)     :: self
     real(dp), intent(in)           :: dt
+
+    error stop "No procedure after_mover specified"
   end subroutine PC_after_dummy
 
   !> Return the cross product of vectors a and b
