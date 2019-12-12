@@ -296,7 +296,7 @@ contains
        rng_seed_8byte = transfer(rng_seed, rng_seed_8byte)
        call self%rng%set_seed(rng_seed_8byte)
     else
-       call self%rng%set_seed([8972134_i8, 21384823409_i8])
+       call self%rng%set_random_seed()
     end if
 
     ! Set default particle mover
@@ -354,7 +354,7 @@ contains
        rng_seed_8byte = transfer(rng_seed, rng_seed_8byte)
        call self%rng%set_seed(rng_seed_8byte)
     else
-       call self%rng%set_seed([8972134_i8, 21384823409_i8])
+       call self%rng%set_random_seed()
     end if
   end subroutine init_from_file
 

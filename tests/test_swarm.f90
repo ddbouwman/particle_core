@@ -37,8 +37,7 @@ program test_m_particle_core
        cross_secs)
 
   print *, "Initializing particle module"
-  rng_seed = get_random_seed()
-  call pc%initialize(part_mass, max_num_part, rng_seed=rng_seed)
+  call pc%initialize(part_mass, max_num_part)
   call pc%use_cross_secs(max_en_eV, lkp_tbl_size, cross_secs)
 
   where (pc%colls(:)%type == CS_ionize_t)
@@ -112,16 +111,5 @@ contains
        error stop "FAIL"
     end if
   end subroutine print_stats
-
-  !> Get a random seed based on the current time
-  function get_random_seed() result(seed)
-    integer :: seed(4)
-    integer :: time, i
-
-    call system_clock(time)
-    do i = 1, 4
-       seed(i) = ishftc(time, i*8)
-    end do
-  end function get_random_seed
 
 end program test_m_particle_core
