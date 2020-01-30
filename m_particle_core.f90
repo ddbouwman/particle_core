@@ -264,6 +264,9 @@ module m_particle_core
      end function rate_func
   end interface
 
+  ! Public types
+  public :: PC_particle_went_out
+
   ! Public procedures
   public :: PC_merge_part_rxv
   public :: PC_split_part
